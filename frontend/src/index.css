@@ -23,3 +23,29 @@ body,
   color: #1a1a1a;
   pointer-events: none; /* 패널 위를 클릭해도 지도가 클릭되도록 */
 }
+
+.api-status {
+  position: absolute;
+  left: 10px;
+  bottom: 40px; /* 축척 표시 바로 위 */
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #1a1a1a;
+  background: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+}
+
+.api-status--ok {
+  border-left: 4px solid #30a46c;
+}
+
+.api-status--error {
+  border-left: 4px solid #e5484d;
+}
+
+.api-status--loading {
+  border-left: 4px solid #8b8d98;
+}
