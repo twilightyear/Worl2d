@@ -1,0 +1,18 @@
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
+# Backend (Spring Boot, Gradle)
+backend/build/
+backend/.gradle/
+backend/out/
+
+# Dev
+.env
