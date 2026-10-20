@@ -1,0 +1,36 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "name": "서울광장", "kind": "area" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [126.9774, 37.5654],
+            [126.9785, 37.5654],
+            [126.9785, 37.5662],
+            [126.9774, 37.5662],
+            [126.9774, 37.5654]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "서울특별시청", "kind": "place" },
+      "geometry": { "type": "Point", "coordinates": [126.97795, 37.5665] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "덕수궁 대한문", "kind": "place" },
+      "geometry": { "type": "Point", "coordinates": [126.97685, 37.5654] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "name": "청계광장", "kind": "place" },
+      "geometry": { "type": "Point", "coordinates": [126.978, 37.569] }
+    }
+  ]
+}

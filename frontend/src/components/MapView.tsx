@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { addSampleLayer } from '../map/sampleLayer';
 
 // 환경변수가 없을 때 쓰는 기본값 (OpenFreeMap, 무료·키 없음)
 const DEFAULT_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
@@ -33,6 +34,9 @@ export default function MapView() {
     // 확대/축소 버튼과 축척 표시. 출처 표기(attribution)는 MapLibre가 기본으로 표시한다.
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
+
+    // 기본 지도 스타일 로딩이 끝나야 그 위에 우리 데이터 레이어를 추가할 수 있다.
+    map.on('load', () => addSampleLayer(map));
 
     // 클릭 지점 마커는 하나만 만들고, 클릭할 때마다 위치만 옮긴다.
     const marker = new maplibregl.Marker({ color: '#e5484d' });
