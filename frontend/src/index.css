@@ -82,3 +82,11 @@ body,
 .character[data-facing='down'] { --dx: 0; --dy: 90%; }
 .character[data-facing='left'] { --dx: -90%; --dy: 0; }
 .character[data-facing='right'] { --dx: 90%; --dy: 0; }
+
+/* 게임 화면 캔버스: 지도 캔버스 바로 위, 마커(캐릭터) 아래. 클릭은 지도로 통과시킨다. */
+.game-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}

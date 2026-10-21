@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { createCharacter, type Direction } from '../game/character';
+import { createTileRenderer, type TileRenderer } from '../game/renderer';
 import { tileAt, type TileId } from '../map/grid';
 import { addGridLayer, GRID_MIN_ZOOM, showSelectedTile } from '../map/gridLayer';
 import { addSampleLayer } from '../map/sampleLayer';
-import { addTileLayer } from '../map/tileLayer';
+import { createTileStore } from '../map/tileStore';
 
 // 환경변수가 없을 때 쓰는 기본값 (OpenFreeMap, 무료·키 없음)
 const DEFAULT_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
@@ -59,20 +60,21 @@ export default function MapView() {
     // 기본 지도 스타일 로딩이 끝나야 그 위에 우리 데이터 레이어를 추가할 수 있다.
     let destroyCharacter: (() => void) | undefined;
     let tilesVisible = true;
-    let setTilesVisible: ((visible: boolean) => void) | undefined;
+    let renderer: TileRenderer | undefined;
 
-    // M 키: 게임 타일 화면 ↔ 원래 지도 화면 (비교/디버깅용)
+    // M 키: 게임 화면 ↔ 원래 지도 화면 (비교/디버깅용)
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code !== 'KeyM' || !setTilesVisible) return;
+      if (e.code !== 'KeyM' || !renderer) return;
       tilesVisible = !tilesVisible;
-      setTilesVisible(tilesVisible);
+      renderer.setVisible(tilesVisible);
     };
     window.addEventListener('keydown', onKeyDown);
 
     map.on('load', () => {
       addSampleLayer(map);
       addGridLayer(map);
-      setTilesVisible = addTileLayer(map);
+      const store = createTileStore(map, () => map.triggerRepaint());
+      renderer = createTileRenderer(map, store);
       destroyCharacter = createCharacter(map, {
         start: START_TILE,
         onChange: (tile, facing) => setPlayer({ tile, facing }),
@@ -90,6 +92,7 @@ export default function MapView() {
       const tile = tileAt(lng, lat);
       marker.setLngLat([lng, lat]).addTo(map);
       showSelectedTile(map, tile);
+      renderer?.setSelected(tile);
       setClicked({ lng, lat, tile });
     });
 
@@ -97,6 +100,7 @@ export default function MapView() {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       destroyCharacter?.();
+      renderer?.destroy();
       map.remove();
     };
   }, []);
@@ -111,7 +115,7 @@ export default function MapView() {
           </div>
         )}
         <div>이동: 방향키 또는 WASD</div>
-        <div>M: 게임 타일 / 지도 전환</div>
+        <div>M: 게임 화면 / 지도 전환</div>
         <hr />
         {clicked ? (
           <>
