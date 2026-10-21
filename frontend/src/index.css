@@ -49,3 +49,36 @@ body,
 .api-status--loading {
   border-left: 4px solid #8b8d98;
 }
+
+.coord-panel hr {
+  margin: 6px 0;
+  border: none;
+  border-top: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+/* 캐릭터 (임시 모양: 원 + 바라보는 방향의 흰 점)
+   주의: MapLibre Marker가 위치 지정에 transform/position을 쓰므로 여기서 건드리지 않는다. */
+.character {
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: #ef4444;
+  border: 3px solid #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+.character::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 30%;
+  height: 30%;
+  border-radius: 50%;
+  background: #ffffff;
+  transform: translate(-50%, -50%) translate(var(--dx, 0), var(--dy, 0));
+}
+
+.character[data-facing='up'] { --dx: 0; --dy: -90%; }
+.character[data-facing='down'] { --dx: 0; --dy: 90%; }
+.character[data-facing='left'] { --dx: -90%; --dy: 0; }
+.character[data-facing='right'] { --dx: 90%; --dy: 0; }

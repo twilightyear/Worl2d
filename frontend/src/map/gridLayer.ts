@@ -30,24 +30,40 @@ export function addGridLayer(map: MapLibreMap): void {
     paint: { 'line-color': '#111827', 'line-opacity': 0.3, 'line-width': 1 },
   });
 
+  // 마지막으로 격자선을 계산한 범위. 화면이 이 안에 있으면 다시 계산하지 않는다.
+  // (캐릭터 이동 중에는 카메라가 매 프레임 움직이기 때문)
+  let covered: { west: number; south: number; east: number; north: number } | null = null;
+
   // 화면이 멈출 때마다 보이는 범위(+ 여유분)의 격자선만 다시 계산한다.
   const update = () => {
     const source = map.getSource<GeoJSONSource>(GRID_SOURCE);
     if (!source) return;
     if (map.getZoom() < GRID_MIN_ZOOM) {
-      source.setData(EMPTY);
+      if (covered) source.setData(EMPTY);
+      covered = null;
       return;
     }
     const b = map.getBounds();
+    if (
+      covered &&
+      b.getWest() >= covered.west &&
+      b.getSouth() >= covered.south &&
+      b.getEast() <= covered.east &&
+      b.getNorth() <= covered.north
+    ) {
+      return;
+    }
     const padLng = (b.getEast() - b.getWest()) / 2;
     const padLat = (b.getNorth() - b.getSouth()) / 2;
-    const lines = gridLines(
-      b.getWest() - padLng,
-      b.getSouth() - padLat,
-      b.getEast() + padLng,
-      b.getNorth() + padLat,
-    );
+    const next = {
+      west: b.getWest() - padLng,
+      south: b.getSouth() - padLat,
+      east: b.getEast() + padLng,
+      north: b.getNorth() + padLat,
+    };
+    const lines = gridLines(next.west, next.south, next.east, next.north);
     source.setData(lines ?? EMPTY);
+    covered = lines ? next : null;
   };
 
   update();
