@@ -64,19 +64,24 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
     onUpdate();
 
     // 남은 청크는 다음 프레임에 이어서 계산한다.
+    // requestAnimationFrame으로 바로 부르면, 순간 이동 직후 지도가 새 위치 데이터를 요청하기 전에 실행되어
+    // 예전 데이터로 계산될 수 있다. 그래서 지도가 다시 그려진 직후(render)에만 이어서 계산한다.
     if (pending.length > 1 && !scheduled) {
       scheduled = true;
-      requestAnimationFrame(() => {
+      map.once('render', () => {
         scheduled = false;
         update();
       });
+      map.triggerRepaint();
     }
   };
 
   // 데이터 로딩이 끝났을 때(idle)와, 캐릭터 이동처럼 지도가 계속 움직이는 중(moveend)에도 계산한다.
   // 새로 계산할 청크가 없으면 바로 끝나므로 자주 호출해도 부담이 적다.
+  // moveend 직후에는 지도가 아직 새 위치의 데이터를 요청하기 전이라 '다 들어왔다'고 잘못 답한다.
+  // 그래서 지도가 한 번 다시 그려진 뒤(새 위치 기준으로 데이터 요청이 반영된 뒤)에 계산한다.
   map.on('idle', update);
-  map.on('moveend', update);
+  map.on('moveend', () => map.once('render', update));
   update();
 
   // 칸 좌표 → (청크 데이터, 배열 index)
