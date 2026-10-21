@@ -95,3 +95,32 @@ export function gridLines(
 
   return { type: 'FeatureCollection', features };
 }
+
+// ---------------------------------------------------------------------------
+// 청크: 칸 CHUNK_SIZE × CHUNK_SIZE 묶음. 칸 종류 계산과 그리기를 이 단위로 한다.
+// 청크 ID = floor(칸 ID / CHUNK_SIZE). 백엔드도 같은 규칙을 쓸 예정이다.
+
+export const CHUNK_SIZE = 64;
+
+export type ChunkId = { cx: number; cy: number };
+
+export function chunkOf(tile: TileId): ChunkId {
+  return { cx: Math.floor(tile.x / CHUNK_SIZE), cy: Math.floor(tile.y / CHUNK_SIZE) };
+}
+
+/** 청크의 메르카토르 범위 (m) */
+export function chunkBounds({ cx, cy }: ChunkId) {
+  const span = CHUNK_SIZE * TILE_SIZE;
+  return { minX: cx * span, minY: cy * span, maxX: (cx + 1) * span, maxY: (cy + 1) * span };
+}
+
+/** 경위도 범위와 겹치는 청크 목록 */
+export function chunksInBounds(west: number, south: number, east: number, north: number): ChunkId[] {
+  const sw = chunkOf(tileAt(west, south));
+  const ne = chunkOf(tileAt(east, north));
+  const chunks: ChunkId[] = [];
+  for (let cx = sw.cx; cx <= ne.cx; cx++) {
+    for (let cy = sw.cy; cy <= ne.cy; cy++) chunks.push({ cx, cy });
+  }
+  return chunks;
+}
