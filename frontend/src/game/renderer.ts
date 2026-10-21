@@ -11,10 +11,13 @@ const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6378137;
 const WORLD_PX = 512; // MapLibre의 줌 0 세계 크기(px)
 
 // ---- 카메라: 남쪽에서 비스듬히 내려다보는 시점 ---------------------------------
-/** 높이 1m가 화면에서 위로 몇 m만큼 솟아 보이는지. 클수록 카메라가 낮게 누운 느낌 */
-const TILT = 0.8;
-/** 가상 카메라 높이(메르카토르 m). 아주 약한 원근만 주려고 크게 잡는다 (화면 양 끝 건물의 옆면이 살짝 보임) */
-const CAMERA_HEIGHT = 900;
+/** 높이 1m가 화면에서 위로 몇 m만큼 솟아 보이는지. 클수록 카메라가 남쪽으로 누운 느낌 */
+const TILT = 0.5;
+/**
+ * 가상 카메라 높이(메르카토르 m). 낮을수록 원근이 강해져서, 캐릭터가 움직일 때
+ * 건물이 기우는 방향과 보이는 면(남·북·동·서)이 크게 달라진다.
+ */
+const CAMERA_HEIGHT = 200;
 
 // ---- 건물 높이 압축 (그대로 그리면 고층 건물 벽이 화면을 덮는다) -----------------
 /** 높이 값이 없거나 아주 낮은 건물의 최소 높이(m) */
@@ -241,8 +244,13 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     // ---- 2) 건물과 캐릭터 (북쪽=뒤쪽부터 그려서 남쪽=앞쪽이 가리게) ---------------
     // 화면 아래(남쪽) 바깥에 있는 건물도 위로 솟아 화면에 들어올 수 있으므로 남쪽으로 여유를 둔다.
     const southMargin = Math.ceil(((MAX_RENDER_M / realPerMerc) * TILT) / TILE_SIZE) + 1;
-    type Item = { kind: 'building'; x: number; y: number; h: number; color: number; key: number; side: number };
-    type ActorItem = { kind: 'actor'; key: number; side: number };
+    // 그리는 순서: 가상 카메라가 있는 바닥 지점에서 먼 것부터.
+    // 카메라는 화면 중심 위에서 남쪽으로 기울어 있으므로, 그 바닥 지점은 중심보다 남쪽이다.
+    const eyeX = cmx;
+    const eyeY = cmy - CAMERA_HEIGHT * TILT;
+    const dist2 = (mx: number, my: number) => (mx - eyeX) ** 2 + (my - eyeY) ** 2;
+    type Item = { kind: 'building'; x: number; y: number; h: number; color: number; d: number };
+    type ActorItem = { kind: 'actor'; d: number };
     const items: (Item | ActorItem)[] = [];
     for (let y = y0 - southMargin; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
@@ -250,16 +258,14 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
         if (h === 0) continue;
         // 비슷한 색은 같은 그림을 쓰도록 색을 16단계로 묶는다 (그림 캐시가 너무 커지지 않게)
         const color = (store.color(x, y) & 0xf0f0f0) | 0x080808;
-        items.push({ kind: 'building', x, y, h, color, key: y, side: Math.abs((x + 0.5) * TILE_SIZE - cmx) });
+        items.push({ kind: 'building', x, y, h, color, d: dist2((x + 0.5) * TILE_SIZE, (y + 0.5) * TILE_SIZE) });
       }
     }
     const actor = getActor?.();
     if (actor) {
-      // 캐릭터는 칸 중심에 서 있으므로 칸 번호와 같은 기준(중심 - 0.5)으로 앞뒤를 정한다.
-      items.push({ kind: 'actor', key: actor.pos[1] / TILE_SIZE - 0.5, side: 0 });
+      items.push({ kind: 'actor', d: dist2(actor.pos[0], actor.pos[1]) });
     }
-    // 북쪽(key가 큰 것)부터, 같은 줄이면 화면 중심에서 먼 것부터
-    items.sort((a, b) => b.key - a.key || b.side - a.side);
+    items.sort((a, b) => b.d - a.d);
 
     const fillQuad = (pts: Pt[], style: string) => {
       ctx.beginPath();
@@ -354,14 +360,16 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       const yb = (y + 1) * TILE_SIZE;
 
       // 이웃 칸보다 높은 부분만 옆면을 그린다 (이웃이 같거나 높으면 가려진다).
-      // 카메라가 남쪽에 있으므로 남쪽 면은 항상, 동·서쪽 면은 원근으로 보이는 쪽만, 북쪽 면은 보이지 않는다.
+      // 보이는 면은 실제 투영으로 판단한다: 윗면이 바닥보다 화면에서 어느 쪽으로 밀렸는지에 따라,
+      // 그 반대쪽 면이 드러난다. 캐릭터 위치에 따라 남·북·동·서 어느 면이든 보일 수 있다.
       const hs = heightAt(x, y - 1);
       const hn = heightAt(x, y + 1);
       const hw = heightAt(x - 1, y);
       const he = heightAt(x + 1, y);
-      if (cmx < xa && hw < h) face(bs, 'west', [xa, ya], [xa, yb], hw, h);
-      if (cmx > xb && he < h) face(bs, 'east', [xb, ya], [xb, yb], he, h);
-      if (hs < h) face(bs, 'south', [xa, ya], [xb, ya], hs, h);
+      if (hw < h && PX(xa, h) > PX(xa)) face(bs, 'west', [xa, ya], [xa, yb], hw, h);
+      if (he < h && PX(xb, h) < PX(xb)) face(bs, 'east', [xb, ya], [xb, yb], he, h);
+      if (hn < h && PY(yb, h) > PY(yb)) face(bs, 'north', [xa, yb], [xb, yb], hn, h);
+      if (hs < h && PY(ya, h) < PY(ya)) face(bs, 'south', [xa, ya], [xb, ya], hs, h);
 
       // 지붕(윗면)
       const left = Math.round(PX(xa, h));
