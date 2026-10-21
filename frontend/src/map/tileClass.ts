@@ -42,9 +42,11 @@ const WATERWAY_WIDTH_M = 3;
 /** 칸 하나를 몇 px로 그려서 판단할지. 칸 중심 픽셀만 읽으므로 경계의 흐림(안티앨리어싱) 영향을 피한다. */
 const SAMPLE_SCALE = 4;
 
-/** 칸 종류를 빨강 채널 값으로 그려 두었다가 다시 읽는다. */
-const CLASS_STEP = 50;
-const classFill = (c: TileClass) => `rgb(${c * CLASS_STEP},0,0)`;
+/** 칸 중심이 이 비율 이상 덮이면 그 종류로 본다 (알파 0~255 중 128 = 50%) */
+const COVER_THRESHOLD = 128;
+
+/** 칸 종류를 그리는 순서. 나중 종류가 우선한다. */
+const CLASS_ORDER: TileClass[] = [TileClass.Green, TileClass.Water, TileClass.Road, TileClass.Building];
 
 type Draw = { cls: TileClass; geometry: Geometry; widthM?: number };
 
@@ -67,7 +69,10 @@ export function collectFeatures(map: MapLibreMap, sourceId: string): Draw[] {
   for (const f of q('park')) draws.push({ cls: TileClass.Green, geometry: f.geometry });
   // 2) 물
   for (const f of q('water')) draws.push({ cls: TileClass.Water, geometry: f.geometry });
-  for (const f of q('waterway')) draws.push({ cls: TileClass.Water, geometry: f.geometry, widthM: WATERWAY_WIDTH_M });
+  for (const f of q('waterway')) {
+    if (f.properties?.brunnel === 'tunnel') continue; // 땅속 수로(복개천)는 제외
+    draws.push({ cls: TileClass.Water, geometry: f.geometry, widthM: WATERWAY_WIDTH_M });
+  }
   // 3) 도로 (지하 도로는 제외)
   for (const f of q('transportation')) {
     const width = ROAD_WIDTH_M[cls(f)];
@@ -120,41 +125,44 @@ export function classifyChunk(chunk: ChunkId, draws: Draw[]): Uint8Array {
     });
   };
 
-  ctx.fillStyle = classFill(TileClass.Ground);
-  ctx.fillRect(0, 0, size, size);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
+  ctx.fillStyle = '#fff';
+  ctx.strokeStyle = '#fff';
 
-  for (const d of draws) {
-    const g = d.geometry;
-    ctx.beginPath();
-    if (g.type === 'Polygon') {
-      tracePolygon(g.coordinates);
-      ctx.fillStyle = classFill(d.cls);
-      ctx.fill('evenodd');
-    } else if (g.type === 'MultiPolygon') {
-      g.coordinates.forEach(tracePolygon);
-      ctx.fillStyle = classFill(d.cls);
-      ctx.fill('evenodd');
-    } else if ((g.type === 'LineString' || g.type === 'MultiLineString') && d.widthM) {
-      if (g.type === 'LineString') traceLine(g.coordinates);
-      else g.coordinates.forEach(traceLine);
-      ctx.strokeStyle = classFill(d.cls);
-      ctx.lineWidth = (d.widthM / realPerMercator) * pxPerM;
-      ctx.stroke();
-    }
-  }
-
-  // 각 칸의 중심 픽셀을 읽어 칸 종류로 바꾼다.
-  const data = ctx.getImageData(0, 0, size, size).data;
-  const result = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+  // 모든 칸을 땅으로 시작한다.
+  const result = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE).fill(TileClass.Ground);
   const half = Math.floor(SAMPLE_SCALE / 2);
-  for (let row = 0; row < CHUNK_SIZE; row++) {
-    for (let col = 0; col < CHUNK_SIZE; col++) {
-      const px = col * SAMPLE_SCALE + half;
-      const py = row * SAMPLE_SCALE + half;
-      const red = data[(py * size + px) * 4];
-      result[row * CHUNK_SIZE + col] = Math.min(TileClass.Building, Math.round(red / CLASS_STEP)) as TileClass;
+
+  // 종류마다 따로 그려서(다른 종류와 색이 섞이지 않게) 칸 중심이 절반 이상 덮였는지 본다.
+  // 한 캔버스에 여러 종류를 겹쳐 그리면, 경계의 부드럽게 섞인 색이 엉뚱한 종류로 읽혔다.
+  for (const cls of CLASS_ORDER) {
+    ctx.clearRect(0, 0, size, size);
+    for (const d of draws) {
+      if (d.cls !== cls) continue;
+      const g = d.geometry;
+      ctx.beginPath();
+      if (g.type === 'Polygon') {
+        tracePolygon(g.coordinates);
+        ctx.fill('evenodd');
+      } else if (g.type === 'MultiPolygon') {
+        g.coordinates.forEach(tracePolygon);
+        ctx.fill('evenodd');
+      } else if ((g.type === 'LineString' || g.type === 'MultiLineString') && d.widthM) {
+        if (g.type === 'LineString') traceLine(g.coordinates);
+        else g.coordinates.forEach(traceLine);
+        ctx.lineWidth = (d.widthM / realPerMercator) * pxPerM;
+        ctx.stroke();
+      }
+    }
+
+    const data = ctx.getImageData(0, 0, size, size).data;
+    for (let row = 0; row < CHUNK_SIZE; row++) {
+      for (let col = 0; col < CHUNK_SIZE; col++) {
+        const px = col * SAMPLE_SCALE + half;
+        const py = row * SAMPLE_SCALE + half;
+        if (data[(py * size + px) * 4 + 3] >= COVER_THRESHOLD) result[row * CHUNK_SIZE + col] = cls;
+      }
     }
   }
   return result;
