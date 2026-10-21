@@ -3,20 +3,28 @@ import { CHUNK_SIZE, TILE_SIZE, toMercator, type TileId } from '../map/grid';
 import { GRID_MIN_ZOOM } from '../map/gridLayer';
 import { TileClass } from '../map/tileClass';
 import type { TileStore } from '../map/tileStore';
+import type { CharacterState } from './character';
 import { createSprites, SPRITE_PX, variantOf, type BuildingSprites } from './sprites';
 
 const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6378137;
 const WORLD_PX = 512; // MapLibre의 줌 0 세계 크기(px)
 
-// ---- 가짜 3D 건물 설정 --------------------------------------------------------
-/** 가상 카메라 높이(메르카토르 m). 낮을수록 건물이 화면 바깥쪽으로 많이 기울어 보인다. */
-const CAMERA_HEIGHT = 250;
-/** 건물 높이 상한 = 카메라 높이 × 이 비율 (아주 높은 건물이 화면 밖으로 지나치게 뻗지 않게) */
-const MAX_HEIGHT_RATIO = 0.6;
+// ---- 카메라: 남쪽에서 비스듬히 내려다보는 시점 ---------------------------------
+/** 높이 1m가 화면에서 위로 몇 m만큼 솟아 보이는지. 클수록 카메라가 낮게 누운 느낌 */
+const TILT = 0.8;
+/** 가상 카메라 높이(메르카토르 m). 아주 약한 원근만 주려고 크게 잡는다 (화면 양 끝 건물의 옆면이 살짝 보임) */
+const CAMERA_HEIGHT = 900;
+
+// ---- 건물 높이 압축 (그대로 그리면 고층 건물 벽이 화면을 덮는다) -----------------
 /** 높이 값이 없거나 아주 낮은 건물의 최소 높이(m) */
 const MIN_BUILDING_M = 3;
-/** 벽 그림 한 장(창문 한 줄)이 나타내는 실제 높이(m) */
-const WALL_ROW_M = 4;
+/** 이 높이(m)까지는 그대로, 넘는 부분은 HEIGHT_SCALE 비율로 줄여서 그린다 */
+const HEIGHT_KEEP_M = 4;
+const HEIGHT_SCALE = 0.35;
+/** 그리는 높이 상한(m) */
+const MAX_RENDER_M = 30;
+/** 벽 그림 한 장(창문 한 줄)이 나타내는 높이(m, 압축된 높이 기준) */
+const WALL_ROW_M = 3;
 /** 칸이 화면에서 이보다 작으면(px) 벽을 그림 대신 단색으로 그린다 (성능) */
 const TEXTURE_MIN_TILE_PX = 24;
 
@@ -34,6 +42,8 @@ type Pt = [number, number];
 export type TileRenderer = {
   setVisible(visible: boolean): void;
   setSelected(tile: TileId | null): void;
+  /** 캐릭터 상태를 알려 주는 함수. 건물과 앞뒤 순서를 맞춰 그린다. */
+  setActor(get: () => CharacterState): void;
   destroy(): void;
 };
 
@@ -125,6 +135,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
 
   let visible = true;
   let selected: TileId | null = null;
+  let getActor: (() => CharacterState) | null = null;
 
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
@@ -150,16 +161,19 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     const textured = TILE_SIZE * k >= TEXTURE_MIN_TILE_PX;
     const wallRowMerc = WALL_ROW_M / realPerMerc;
 
-    // 높이 h(메르카토르 m)에 있는 점의 화면 좌표. 높을수록 화면 중심에서 바깥으로 밀린다(원근).
+    // 높이 h(메르카토르 m)에 있는 점의 화면 좌표.
+    // 높을수록 화면 위로 솟고(비스듬한 시점), 아주 약하게 화면 중심에서 바깥으로 밀린다(원근).
+    // 바닥(h = 0)은 MapLibre 지도와 정확히 같은 위치다. (클릭·충돌·격자가 그대로 맞는다)
     const scale = (h: number) => CAMERA_HEIGHT / (CAMERA_HEIGHT - h);
     const PX = (mx: number, h = 0) => W / 2 + (mx - cmx) * k * scale(h);
-    const PY = (my: number, h = 0) => H / 2 - (my - cmy) * k * scale(h);
+    const PY = (my: number, h = 0) => H / 2 - (my - cmy) * k * scale(h) - h * TILT * k;
 
-    // 건물 높이(메르카토르 m). 건물이 아니면 0
+    // 그릴 건물 높이(메르카토르 m). 건물이 아니면 0
     const heightAt = (x: number, y: number) => {
       if (store.get(x, y) !== TileClass.Building) return 0;
       const real = Math.max(MIN_BUILDING_M, store.height(x, y));
-      return Math.min(real / realPerMerc, CAMERA_HEIGHT * MAX_HEIGHT_RATIO);
+      const shown = real <= HEIGHT_KEEP_M ? real : HEIGHT_KEEP_M + (real - HEIGHT_KEEP_M) * HEIGHT_SCALE;
+      return Math.min(shown, MAX_RENDER_M) / realPerMerc;
     };
 
     // 화면에 보이는 칸 범위 (건물은 화면 바깥쪽으로만 기울므로 바닥 범위만 보면 된다)
@@ -189,20 +203,28 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       ctx.fillRect(left, top, PX((selected.x + 1) * TILE_SIZE) - left, PY(selected.y * TILE_SIZE) - top);
     }
 
-    // ---- 2) 건물 (먼 것부터 그려서 가까운 건물이 앞을 가리게) ------------------
-    const buildings: { x: number; y: number; h: number; d: number; color: number }[] = [];
-    for (let y = y0; y <= y1; y++) {
+    // ---- 2) 건물과 캐릭터 (북쪽=뒤쪽부터 그려서 남쪽=앞쪽이 가리게) ---------------
+    // 화면 아래(남쪽) 바깥에 있는 건물도 위로 솟아 화면에 들어올 수 있으므로 남쪽으로 여유를 둔다.
+    const southMargin = Math.ceil(((MAX_RENDER_M / realPerMerc) * TILT) / TILE_SIZE) + 1;
+    type Item = { kind: 'building'; x: number; y: number; h: number; color: number; key: number; side: number };
+    type ActorItem = { kind: 'actor'; key: number; side: number };
+    const items: (Item | ActorItem)[] = [];
+    for (let y = y0 - southMargin; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         const h = heightAt(x, y);
         if (h === 0) continue;
-        const dx = (x + 0.5) * TILE_SIZE - cmx;
-        const dy = (y + 0.5) * TILE_SIZE - cmy;
         // 비슷한 색은 같은 그림을 쓰도록 색을 16단계로 묶는다 (그림 캐시가 너무 커지지 않게)
         const color = (store.color(x, y) & 0xf0f0f0) | 0x080808;
-        buildings.push({ x, y, h, d: dx * dx + dy * dy, color });
+        items.push({ kind: 'building', x, y, h, color, key: y, side: Math.abs((x + 0.5) * TILE_SIZE - cmx) });
       }
     }
-    buildings.sort((a, b) => b.d - a.d);
+    const actor = getActor?.();
+    if (actor) {
+      // 캐릭터는 칸 중심에 서 있으므로 칸 번호와 같은 기준(중심 - 0.5)으로 앞뒤를 정한다.
+      items.push({ kind: 'actor', key: actor.pos[1] / TILE_SIZE - 0.5, side: 0 });
+    }
+    // 북쪽(key가 큰 것)부터, 같은 줄이면 화면 중심에서 먼 것부터
+    items.sort((a, b) => b.key - a.key || b.side - a.side);
 
     const fillQuad = (pts: Pt[], style: string) => {
       ctx.beginPath();
@@ -249,22 +271,53 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       if (SHADE[f]) fillQuad(quad, `rgba(0,0,0,${SHADE[f]})`);
     };
 
-    for (const { x, y, h, color } of buildings) {
+    const tilePx = TILE_SIZE * k;
+    const drawActor = () => {
+      if (!actor) return;
+      // 임시 캐릭터 그림 (도트 캐릭터로 교체 예정): 발밑 그림자 + 몸
+      const fx = PX(actor.pos[0]);
+      const fy = PY(actor.pos[1]);
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.beginPath();
+      ctx.ellipse(fx, fy + tilePx * 0.25, tilePx * 0.35, tilePx * 0.14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      const cy = fy - tilePx * 0.3;
+      const r = tilePx * 0.38;
+      ctx.fillStyle = '#ef4444';
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(1, tilePx * 0.06);
+      ctx.beginPath();
+      ctx.arc(fx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      const d = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[actor.facing];
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(fx + d[0] * r * 0.5, cy + d[1] * r * 0.5, r * 0.28, 0, Math.PI * 2);
+      ctx.fill();
+    };
+
+    for (const item of items) {
+      if (item.kind === 'actor') {
+        drawActor();
+        continue;
+      }
+      const { x, y, h, color } = item;
       const bs = sprites.building(color);
       const xa = x * TILE_SIZE;
       const xb = (x + 1) * TILE_SIZE;
       const ya = y * TILE_SIZE;
       const yb = (y + 1) * TILE_SIZE;
 
-      // 카메라 쪽을 향한 면 중, 이웃 칸보다 높은 부분만 그린다 (이웃이 같거나 높으면 가려진다).
+      // 이웃 칸보다 높은 부분만 옆면을 그린다 (이웃이 같거나 높으면 가려진다).
+      // 카메라가 남쪽에 있으므로 남쪽 면은 항상, 동·서쪽 면은 원근으로 보이는 쪽만, 북쪽 면은 보이지 않는다.
       const hs = heightAt(x, y - 1);
       const hn = heightAt(x, y + 1);
       const hw = heightAt(x - 1, y);
       const he = heightAt(x + 1, y);
-      if (cmy < ya && hs < h) face(bs, 'south', [xa, ya], [xb, ya], hs, h);
-      if (cmy > yb && hn < h) face(bs, 'north', [xa, yb], [xb, yb], hn, h);
       if (cmx < xa && hw < h) face(bs, 'west', [xa, ya], [xa, yb], hw, h);
       if (cmx > xb && he < h) face(bs, 'east', [xb, ya], [xb, yb], he, h);
+      if (hs < h) face(bs, 'south', [xa, ya], [xb, ya], hs, h);
 
       // 지붕(윗면)
       const left = Math.round(PX(xa, h));
@@ -295,6 +348,10 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     },
     setSelected(tile) {
       selected = tile;
+      map.triggerRepaint();
+    },
+    setActor(get) {
+      getActor = get;
       map.triggerRepaint();
     },
     destroy() {

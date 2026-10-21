@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { createCharacter, type Direction } from '../game/character';
+import { createCharacter, type Character, type Direction } from '../game/character';
 import { createTileRenderer, type TileRenderer } from '../game/renderer';
 import { createBasemapToggle } from '../map/basemap';
 import { tileAt, type TileId } from '../map/grid';
@@ -60,7 +60,7 @@ export default function MapView() {
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
 
     // 기본 지도 스타일 로딩이 끝나야 그 위에 우리 데이터 레이어를 추가할 수 있다.
-    let destroyCharacter: (() => void) | undefined;
+    let character: Character | undefined;
     let tilesVisible = true;
     let renderer: TileRenderer | undefined;
 
@@ -86,7 +86,7 @@ export default function MapView() {
       addGridLayer(map);
       const store = createTileStore(map, () => map.triggerRepaint());
       renderer = createTileRenderer(map, store);
-      destroyCharacter = createCharacter(map, {
+      character = createCharacter(map, {
         start: START_TILE,
         // 아직 계산하지 않은 칸(undefined)은 지나갈 수 있게 둔다. 막으면 데이터가 늦을 때 캐릭터가 멈춘다.
         canEnter: (t) => {
@@ -98,6 +98,9 @@ export default function MapView() {
           setPlayer({ tile, facing, ground: cls === undefined ? '?' : TILE_CLASS_LABEL[cls] });
         },
       });
+      // 캐릭터는 렌더러가 건물과 앞뒤 순서를 맞춰 그린다 (건물 뒤에 서면 가려진다)
+      const c = character;
+      renderer.setActor(() => c.getState());
     });
 
     map.on('zoomend', () => setZoom(map.getZoom()));
@@ -118,7 +121,7 @@ export default function MapView() {
     // 컴포넌트가 사라질 때 캐릭터(키보드 이벤트, 애니메이션)와 지도 리소스를 해제한다.
     return () => {
       window.removeEventListener('keydown', onKeyDown);
-      destroyCharacter?.();
+      character?.destroy();
       renderer?.destroy();
       map.remove();
     };
