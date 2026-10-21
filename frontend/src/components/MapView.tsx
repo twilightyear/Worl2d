@@ -3,6 +3,7 @@ import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { createCharacter, type Direction } from '../game/character';
 import { createTileRenderer, type TileRenderer } from '../game/renderer';
+import { createBasemapToggle } from '../map/basemap';
 import { tileAt, type TileId } from '../map/grid';
 import { addGridLayer, GRID_MIN_ZOOM, showSelectedTile } from '../map/gridLayer';
 import { addSampleLayer } from '../map/sampleLayer';
@@ -63,15 +64,24 @@ export default function MapView() {
     let tilesVisible = true;
     let renderer: TileRenderer | undefined;
 
+    let setBasemapVisible: ((visible: boolean) => void) | undefined;
+
+    // 기본 지도는 게임 화면이 보이지 않을 때만 그린다: M 키로 껐을 때, 또는 격자가 안 보일 만큼 축소했을 때
+    const syncBasemap = () => setBasemapVisible?.(!tilesVisible || map.getZoom() < GRID_MIN_ZOOM);
+
     // M 키: 게임 화면 ↔ 원래 지도 화면 (비교/디버깅용)
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code !== 'KeyM' || !renderer) return;
       tilesVisible = !tilesVisible;
       renderer.setVisible(tilesVisible);
+      syncBasemap();
     };
     window.addEventListener('keydown', onKeyDown);
 
     map.on('load', () => {
+      setBasemapVisible = createBasemapToggle(map); // 우리 레이어를 추가하기 전에 만들어야 한다
+      syncBasemap();
+      map.on('zoom', syncBasemap);
       addSampleLayer(map);
       addGridLayer(map);
       const store = createTileStore(map, () => map.triggerRepaint());
