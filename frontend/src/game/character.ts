@@ -1,5 +1,5 @@
-import maplibregl, { type Map as MapLibreMap } from 'maplibre-gl';
-import { fromMercator, TILE_SIZE, tileRing, type TileId } from '../map/grid';
+import type { Map as MapLibreMap } from 'maplibre-gl';
+import { fromMercator, TILE_SIZE, type TileId } from '../map/grid';
 
 export type Direction = 'up' | 'down' | 'left' | 'right';
 
@@ -25,12 +25,18 @@ const KEY_TO_DIRECTION: Record<string, Direction> = {
 
 /** 한 칸 이동에 걸리는 시간(ms). 250ms = 초당 4칸 */
 const STEP_MS = 250;
-/** 캐릭터 크기 = 칸 크기 × 이 비율 */
-const SPRITE_SCALE = 0.8;
 
-type Mercator = [number, number];
+export type Mercator = [number, number];
 
 type Step = { from: Mercator; to: Mercator; target: TileId; startedAt: number };
+
+/** 렌더러가 캐릭터를 그릴 때 쓰는 현재 상태 */
+export type CharacterState = {
+  /** 현재 위치(메르카토르 m). 이동 중에는 두 칸 사이 값 */
+  pos: Mercator;
+  facing: Direction;
+  moving: boolean;
+};
 
 export type CharacterOptions = {
   start: TileId;
@@ -40,43 +46,34 @@ export type CharacterOptions = {
   onChange?: (tile: TileId, facing: Direction) => void;
 };
 
+export type Character = {
+  getState(): CharacterState;
+  destroy(): void;
+};
+
 const tileCenter = (tile: TileId): Mercator => [
   (tile.x + 0.5) * TILE_SIZE,
   (tile.y + 0.5) * TILE_SIZE,
 ];
 
 /**
- * 지도 위에 캐릭터를 놓고 키보드로 한 칸씩 움직인다. 카메라는 캐릭터를 따라간다.
- * 지도 'load' 이후에 호출하고, 반환된 함수로 정리한다.
+ * 키보드로 캐릭터를 한 칸씩 움직이고, 카메라가 캐릭터를 따라가게 한다.
+ * 캐릭터 그림은 렌더러가 getState()를 보고 건물과 앞뒤 순서를 맞춰 그린다.
+ * 지도 'load' 이후에 호출하고, destroy()로 정리한다.
  */
-export function createCharacter(map: MapLibreMap, options: CharacterOptions): () => void {
+export function createCharacter(map: MapLibreMap, options: CharacterOptions): Character {
   let tile: TileId = { ...options.start };
   let facing: Direction = 'down';
   let step: Step | null = null;
+  let pos: Mercator = tileCenter(tile);
   const held: Direction[] = []; // 누르고 있는 방향들. 마지막에 누른 방향이 우선
   // 마지막으로 누른 방향. 키를 아주 짧게 눌렀다 떼서 held에 남아 있지 않아도 한 칸은 이동하게 한다.
   let queued: Direction | null = null;
 
-  const el = document.createElement('div');
-  el.className = 'character';
-  el.dataset.facing = facing;
-  const marker = new maplibregl.Marker({ element: el });
-
-  // 줌이 바뀌면 칸의 화면 크기에 맞춰 캐릭터 크기를 다시 계산한다.
-  const resize = () => {
-    const ring = tileRing(tile);
-    const sw = map.project(ring[0]);
-    const ne = map.project(ring[2]);
-    const size = Math.abs(ne.x - sw.x) * SPRITE_SCALE;
-    el.style.width = `${size}px`;
-    el.style.height = `${size}px`;
-  };
-
-  // 캐릭터와 카메라를 같은 위치에 둔다.
-  const place = ([x, y]: Mercator) => {
-    const lngLat = fromMercator(x, y);
-    marker.setLngLat(lngLat);
-    map.jumpTo({ center: lngLat });
+  // 캐릭터 위치를 바꾸고 카메라를 그 위치로 옮긴다. (카메라 이동이 다시 그리기를 일으킨다)
+  const place = (p: Mercator) => {
+    pos = p;
+    map.jumpTo({ center: fromMercator(p[0], p[1]) });
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
@@ -122,8 +119,8 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): ()
       queued = null;
       if (dir !== facing) {
         facing = dir;
-        el.dataset.facing = dir;
         options.onChange?.(tile, facing);
+        map.triggerRepaint(); // 제자리에서 방향만 바뀌어도 다시 그린다
       }
       const target = { x: tile.x + DELTA[dir].x, y: tile.y + DELTA[dir].y };
       // 막힌 칸이면 그쪽을 바라보기만 하고 제자리에 있는다.
@@ -135,23 +132,21 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): ()
     frame = requestAnimationFrame(loop);
   };
 
-  marker.setLngLat(fromMercator(...tileCenter(tile))).addTo(map);
-  place(tileCenter(tile));
-  resize();
+  place(pos);
   options.onChange?.(tile, facing);
 
-  map.on('zoom', resize);
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
   window.addEventListener('blur', onBlur);
   frame = requestAnimationFrame(loop);
 
-  return () => {
-    cancelAnimationFrame(frame);
-    map.off('zoom', resize);
-    window.removeEventListener('keydown', onKeyDown);
-    window.removeEventListener('keyup', onKeyUp);
-    window.removeEventListener('blur', onBlur);
-    marker.remove();
+  return {
+    getState: () => ({ pos, facing, moving: step !== null }),
+    destroy() {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    },
   };
 }
