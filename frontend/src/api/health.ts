@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080';
+import { API_BASE_URL } from './config';
 
 // 백엔드 record HealthResponse(String status, Instant timestamp)와 같은 모양.
 // Instant는 JSON에서 ISO-8601 문자열(예: "2026-10-20T15:33:21.621357Z")로 온다.

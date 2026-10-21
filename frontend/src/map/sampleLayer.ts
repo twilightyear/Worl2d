@@ -1,8 +1,9 @@
 import type { Map as MapLibreMap } from 'maplibre-gl';
+import { API_BASE_URL } from '../api/config';
 
-// 지금은 정적 파일(public/data). 백엔드 GeoJSON API가 생기면 이 URL만 바꾼다.
+// 백엔드 GET /api/features/sample 이 GeoJSON FeatureCollection을 반환한다.
 // 좌표는 GeoJSON 표준대로 WGS84 [경도, 위도] 순서다.
-const SAMPLE_GEOJSON_URL = '/data/sample.geojson';
+const SAMPLE_GEOJSON_URL = `${API_BASE_URL}/api/features/sample`;
 
 const SOURCE_ID = 'sample';
 
