@@ -43,6 +43,10 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
     ).filter((c) => !chunks.has(key(c.cx, c.cy)));
     if (pending.length === 0) return;
 
+    // 지금 화면의 지도 데이터가 다 들어오기 전에는 계산하지 않는다.
+    // (멀리 이동한 직후에는 예전 지역 데이터만 있어서, 새 청크가 전부 '땅'으로 계산되어 버렸다)
+    if (!map.isSourceLoaded(sourceId)) return;
+
     if (!draws) draws = collectFeatures(map, sourceId);
     if (draws.length === 0) {
       draws = null; // 아직 데이터가 안 들어왔으면 다음에 다시 시도
