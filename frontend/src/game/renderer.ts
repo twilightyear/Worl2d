@@ -10,6 +10,13 @@ const WORLD_PX = 512; // MapLibre의 줌 0 세계 크기(px)
 
 const OUTLINE = '#5e2a20';
 
+/** 건물 높이 몇 m마다 벽 1줄을 그릴지, 최대 몇 줄까지 그릴지 (높이를 그대로 쓰면 고층 건물 벽이 화면을 덮는다) */
+const METERS_PER_WALL_ROW = 10;
+const MAX_WALL_ROWS = 5;
+
+const wallRowsFor = (heightM: number) =>
+  Math.min(MAX_WALL_ROWS, Math.max(1, Math.ceil(heightM / METERS_PER_WALL_ROW)));
+
 export type TileRenderer = {
   setVisible(visible: boolean): void;
   setSelected(tile: TileId | null): void;
@@ -76,8 +83,28 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
         const w = right - left;
         const h = bottom - top;
 
-        if (cls === TileClass.Building && !isBuilding(x, y - 1)) {
-          ctx.drawImage(sprites.wall, left, top, w, h); // 건물의 남쪽 끝은 벽
+        // 건물: 남쪽 끝에서부터 높이에 따른 줄 수만큼은 벽, 그 위는 지붕
+        let wallRow = -1; // 벽이면 남쪽 끝에서 몇 번째 줄인지(0 = 맨 아래), 지붕이면 -1
+        let wallRows = 0;
+        if (cls === TileClass.Building) {
+          wallRows = wallRowsFor(store.height(x, y));
+          let south = 0; // 이 칸 남쪽으로 이어진 건물 칸 수
+          while (south < wallRows && isBuilding(x, y - south - 1)) south++;
+          if (south < wallRows) {
+            let north = 0; // 이 칸 북쪽으로 이어진 건물 칸 수 (지붕을 최소 한 줄 남기기 위해)
+            while (north < wallRows && isBuilding(x, y + north + 1)) north++;
+            const depth = south + 1 + north;
+            // 건물 깊이가 1줄이면 벽 1줄, 아니면 지붕 한 줄은 남긴다.
+            const rows = depth === 1 ? 1 : Math.min(wallRows, depth - 1);
+            if (south < rows) {
+              wallRow = south;
+              wallRows = rows;
+            }
+          }
+        }
+
+        if (wallRow >= 0) {
+          ctx.drawImage(sprites.wall(wallRow === wallRows - 1, wallRow === 0), left, top, w, h);
         } else {
           ctx.drawImage(sprites.tiles[cls][variantOf(x, y)], left, top, w, h);
         }

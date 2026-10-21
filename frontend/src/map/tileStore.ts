@@ -1,13 +1,15 @@
 import type { Map as MapLibreMap } from 'maplibre-gl';
 import { CHUNK_SIZE, chunksInBounds, type ChunkId } from './grid';
 import { GRID_MIN_ZOOM } from './gridLayer';
-import { classifyChunk, collectFeatures, findVectorSourceId, type TileClass } from './tileClass';
+import { classifyChunk, collectFeatures, findVectorSourceId, type ChunkData, type TileClass } from './tileClass';
 
 const key = (cx: number, cy: number) => `${cx}_${cy}`;
 
 export type TileStore = {
   /** 칸 종류. 아직 계산하지 않은 칸이면 undefined */
   get(x: number, y: number): TileClass | undefined;
+  /** 건물 높이(m). 건물이 아니거나 계산 전이면 0 */
+  height(x: number, y: number): number;
 };
 
 /**
@@ -16,7 +18,7 @@ export type TileStore = {
  */
 export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileStore {
   const sourceId = findVectorSourceId(map);
-  const chunks = new Map<string, Uint8Array>();
+  const chunks = new Map<string, ChunkData>();
 
   const update = () => {
     if (!sourceId || map.getZoom() < GRID_MIN_ZOOM) return;
@@ -48,15 +50,25 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
   map.on('moveend', update);
   update();
 
+  // 칸 좌표 → (청크 데이터, 배열 index)
+  const locate = (x: number, y: number): [ChunkData, number] | null => {
+    const cx = Math.floor(x / CHUNK_SIZE);
+    const cy = Math.floor(y / CHUNK_SIZE);
+    const data = chunks.get(key(cx, cy));
+    if (!data) return null;
+    const col = x - cx * CHUNK_SIZE;
+    const row = CHUNK_SIZE - 1 - (y - cy * CHUNK_SIZE); // row 0이 북쪽 줄
+    return [data, row * CHUNK_SIZE + col];
+  };
+
   return {
     get(x, y) {
-      const cx = Math.floor(x / CHUNK_SIZE);
-      const cy = Math.floor(y / CHUNK_SIZE);
-      const classes = chunks.get(key(cx, cy));
-      if (!classes) return undefined;
-      const col = x - cx * CHUNK_SIZE;
-      const row = CHUNK_SIZE - 1 - (y - cy * CHUNK_SIZE); // row 0이 북쪽 줄
-      return classes[row * CHUNK_SIZE + col] as TileClass;
+      const found = locate(x, y);
+      return found ? (found[0].classes[found[1]] as TileClass) : undefined;
+    },
+    height(x, y) {
+      const found = locate(x, y);
+      return found ? found[0].heights[found[1]] : 0;
     },
   };
 }
