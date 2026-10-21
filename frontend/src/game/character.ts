@@ -52,6 +52,8 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): ()
   let facing: Direction = 'down';
   let step: Step | null = null;
   const held: Direction[] = []; // 누르고 있는 방향들. 마지막에 누른 방향이 우선
+  // 마지막으로 누른 방향. 키를 아주 짧게 눌렀다 떼서 held에 남아 있지 않아도 한 칸은 이동하게 한다.
+  let queued: Direction | null = null;
 
   const el = document.createElement('div');
   el.className = 'character';
@@ -80,6 +82,7 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): ()
     if (!dir) return;
     e.preventDefault(); // 방향키로 페이지가 스크롤되지 않게
     if (!held.includes(dir)) held.push(dir);
+    if (!e.repeat) queued = dir;
   };
 
   const onKeyUp = (e: KeyboardEvent) => {
@@ -111,8 +114,10 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): ()
     }
 
     // 2. 멈춰 있고 방향키가 눌려 있으면 다음 칸으로 출발한다.
-    if (!step && held.length > 0) {
-      const dir = held[held.length - 1];
+    const next = held.length > 0 ? held[held.length - 1] : queued;
+    if (!step && next) {
+      const dir = next;
+      queued = null;
       if (dir !== facing) {
         facing = dir;
         el.dataset.facing = dir;
