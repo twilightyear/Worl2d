@@ -16,3 +16,5 @@ backend/out/
 
 # Dev
 .env
+# 원본 에셋 보관용 (필요한 그림만 frontend/public으로 복사해서 사용)
+assets-source/
