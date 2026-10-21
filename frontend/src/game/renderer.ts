@@ -3,7 +3,7 @@ import { CHUNK_SIZE, TILE_SIZE, toMercator, type TileId } from '../map/grid';
 import { GRID_MIN_ZOOM } from '../map/gridLayer';
 import { TileClass } from '../map/tileClass';
 import type { TileStore } from '../map/tileStore';
-import { createSprites, SPRITE_PX, variantOf } from './sprites';
+import { createSprites, SPRITE_PX, variantOf, type BuildingSprites } from './sprites';
 
 const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6378137;
 const WORLD_PX = 512; // MapLibre의 줌 0 세계 크기(px)
@@ -24,7 +24,6 @@ const TEXTURE_MIN_TILE_PX = 24;
 /** 청크 바닥 그림을 몇 장까지 보관할지 (한 장 = 1024×1024px ≈ 4MB) */
 const GROUND_CACHE_MAX = 16;
 
-const OUTLINE = '#5e2a20';
 const WALL_FLAT = '#e6dcc8';
 /** 면 방향별 그늘 (빛이 남쪽 위에서 온다고 가정) */
 const SHADE = { south: 0, east: 0.12, west: 0.12, north: 0.25 } as const;
@@ -191,14 +190,16 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     }
 
     // ---- 2) 건물 (먼 것부터 그려서 가까운 건물이 앞을 가리게) ------------------
-    const buildings: { x: number; y: number; h: number; d: number }[] = [];
+    const buildings: { x: number; y: number; h: number; d: number; color: number }[] = [];
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         const h = heightAt(x, y);
         if (h === 0) continue;
         const dx = (x + 0.5) * TILE_SIZE - cmx;
         const dy = (y + 0.5) * TILE_SIZE - cmy;
-        buildings.push({ x, y, h, d: dx * dx + dy * dy });
+        // 비슷한 색은 같은 그림을 쓰도록 색을 16단계로 묶는다 (그림 캐시가 너무 커지지 않게)
+        const color = (store.color(x, y) & 0xf0f0f0) | 0x080808;
+        buildings.push({ x, y, h, d: dx * dx + dy * dy, color });
       }
     }
     buildings.sort((a, b) => b.d - a.d);
@@ -215,7 +216,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
      * 옆면 하나를 그린다. 모서리(e0 → e1, 바닥 높이 a)에서 꼭대기 높이 b까지.
      * 창문 줄은 꼭대기에서부터 WALL_ROW_M마다 한 장씩 붙이고, 맨 아래 줄은 남는 만큼만 잘라 쓴다.
      */
-    const face = (f: Face, e0: [number, number], e1: [number, number], a: number, b: number) => {
+    const face = (bs: BuildingSprites, f: Face, e0: [number, number], e1: [number, number], a: number, b: number) => {
       const P = ([mx, my]: [number, number], h: number): Pt => [PX(mx, h), PY(my, h)];
       const quad = [P(e0, a), P(e1, a), P(e1, b), P(e0, b)];
       if (!textured) {
@@ -226,7 +227,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
           const tTop = b - i * wallRowMerc;
           const tBottom = Math.max(a, tTop - wallRowMerc);
           const part = (tTop - tBottom) / wallRowMerc; // 이 줄에서 쓰는 비율 (맨 아래 줄만 1보다 작을 수 있음)
-          const src = wallImg(sprites.wall(i === 0, a === 0 && i === rows - 1), f);
+          const src = wallImg(bs.wall(i === 0, a === 0 && i === rows - 1), f);
           const used = Math.max(1, Math.round(part * SPRITE_PX));
           const tMid = (tTop + tBottom) / 2;
           // 띠의 네 모서리 중 가운데 높이 기준으로 사각형을 잡는다 (원근에 의한 미세한 사다리꼴은 무시)
@@ -248,7 +249,8 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       if (SHADE[f]) fillQuad(quad, `rgba(0,0,0,${SHADE[f]})`);
     };
 
-    for (const { x, y, h } of buildings) {
+    for (const { x, y, h, color } of buildings) {
+      const bs = sprites.building(color);
       const xa = x * TILE_SIZE;
       const xb = (x + 1) * TILE_SIZE;
       const ya = y * TILE_SIZE;
@@ -259,21 +261,21 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       const hn = heightAt(x, y + 1);
       const hw = heightAt(x - 1, y);
       const he = heightAt(x + 1, y);
-      if (cmy < ya && hs < h) face('south', [xa, ya], [xb, ya], hs, h);
-      if (cmy > yb && hn < h) face('north', [xa, yb], [xb, yb], hn, h);
-      if (cmx < xa && hw < h) face('west', [xa, ya], [xa, yb], hw, h);
-      if (cmx > xb && he < h) face('east', [xb, ya], [xb, yb], he, h);
+      if (cmy < ya && hs < h) face(bs, 'south', [xa, ya], [xb, ya], hs, h);
+      if (cmy > yb && hn < h) face(bs, 'north', [xa, yb], [xb, yb], hn, h);
+      if (cmx < xa && hw < h) face(bs, 'west', [xa, ya], [xa, yb], hw, h);
+      if (cmx > xb && he < h) face(bs, 'east', [xb, ya], [xb, yb], he, h);
 
       // 지붕(윗면)
       const left = Math.round(PX(xa, h));
       const right = Math.round(PX(xb, h));
       const top = Math.round(PY(yb, h));
       const bottom = Math.round(PY(ya, h));
-      ctx.drawImage(sprites.tiles[TileClass.Building][variantOf(x, y)], left, top, right - left, bottom - top);
+      ctx.drawImage(bs.roofs[variantOf(x, y)], left, top, right - left, bottom - top);
 
       // 지붕 외곽선: 이웃이 더 낮은 쪽 (두께 = 도트 1px)
       const t = Math.max(1, Math.round((right - left) / SPRITE_PX));
-      ctx.fillStyle = OUTLINE;
+      ctx.fillStyle = bs.outline;
       if (hn < h) ctx.fillRect(left, top, right - left, t);
       if (hs < h) ctx.fillRect(left, bottom - t, right - left, t);
       if (hw < h) ctx.fillRect(left, top, t, bottom - top);
