@@ -1,5 +1,5 @@
 import type { Map as MapLibreMap } from 'maplibre-gl';
-import { CHUNK_SIZE, chunkOf, chunksInBounds, tileAt, type ChunkId } from './grid';
+import { CHUNK_SIZE, chunkBounds, chunkOf, chunksInBounds, tileAt, toMercator, type ChunkId } from './grid';
 import { GRID_MIN_ZOOM } from './gridLayer';
 import { classifyChunk, collectFeatures, findVectorSourceId, type ChunkData, type Draw, type TileClass } from './tileClass';
 
@@ -28,9 +28,36 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
   const chunks = new Map<number, ChunkData>();
   // 지도 데이터에서 모은 도형. 지도 데이터가 새로 들어오면 다시 모은다.
   let draws: Draw[] | null = null;
+
+  // 받아 둔 데이터 타일 목록 ("x/y", 데이터 최대 줌 기준).
+  // 청크(약 127m)는 데이터 타일(약 1.9km) 경계에 걸칠 수 있는데, 건너편 타일을 아직 받지 않은 채 계산하면
+  // 그쪽 칸이 전부 땅으로 계산되어 '영역째 깨진' 모양으로 남았다. 그래서 덮는 타일이 다 있을 때만 계산한다.
+  const sourceMaxZoom = (map.getSource(sourceId ?? '') as { maxzoom?: number } | undefined)?.maxzoom ?? 14;
+  const loadedTiles = new Set<string>();
   map.on('sourcedata', (e) => {
-    if (e.sourceId === sourceId && e.tile) draws = null;
+    if (e.sourceId !== sourceId || !e.tile) return;
+    draws = null;
+    const tile = e.tile as { state?: string; tileID?: { canonical?: { z: number; x: number; y: number } } };
+    const c = tile.tileID?.canonical;
+    if (tile.state === 'loaded' && c && c.z === sourceMaxZoom) loadedTiles.add(`${c.x}/${c.y}`);
   });
+
+  /** 메르카토르 범위를 덮는 데이터 타일 목록 */
+  const WORLD = 2 * Math.PI * 6378137;
+  const tilesFor = (minX: number, minY: number, maxX: number, maxY: number) => {
+    const size = WORLD / 2 ** sourceMaxZoom;
+    const tx = (mx: number) => Math.floor((mx + WORLD / 2) / size);
+    const ty = (my: number) => Math.floor((WORLD / 2 - my) / size); // 타일 y는 북쪽이 0
+    const keys: string[] = [];
+    for (let x = tx(minX); x <= tx(maxX); x++) {
+      for (let y = ty(maxY); y <= ty(minY); y++) keys.push(`${x}/${y}`);
+    }
+    return keys;
+  };
+  const covered = (c: ChunkId) => {
+    const b = chunkBounds(c);
+    return tilesFor(b.minX, b.minY, b.maxX, b.maxY).every((k) => loadedTiles.has(k));
+  };
   let scheduled = false;
   let version = 0;
 
@@ -45,12 +72,21 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
       b.getSouth() - padLat,
       b.getEast() + padLng,
       b.getNorth() + padLat,
-    ).filter((c) => !chunks.has(key(c.cx, c.cy)));
+    ).filter((c) => !chunks.has(key(c.cx, c.cy)) && covered(c));
     if (pending.length === 0) return;
 
     // 지금 화면의 지도 데이터가 다 들어오기 전에는 계산하지 않는다.
     // (멀리 이동한 직후에는 예전 지역 데이터만 있어서, 새 청크가 전부 '땅'으로 계산되어 버렸다)
     if (!map.isSourceLoaded(sourceId)) return;
+
+    // 지금 화면을 덮는 데이터 타일은 확실히 받아져 있다. (처음 로딩 때처럼 기록을 시작하기 전에
+    // 받은 타일이 있을 수 있어서, 여기서도 기록해 둔다)
+    {
+      const v = map.getBounds();
+      const [vx0, vy0] = toMercator(v.getWest(), v.getSouth());
+      const [vx1, vy1] = toMercator(v.getEast(), v.getNorth());
+      for (const k of tilesFor(vx0, vy0, vx1, vy1)) loadedTiles.add(k);
+    }
 
     if (!draws) draws = collectFeatures(map, sourceId);
     if (draws.length === 0) {
