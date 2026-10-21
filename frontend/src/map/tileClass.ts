@@ -62,7 +62,14 @@ const COVER_THRESHOLD = 128;
 /** 칸 종류를 그리는 순서. 나중 종류가 우선한다. */
 const CLASS_ORDER: TileClass[] = [TileClass.Green, TileClass.Water, TileClass.Road, TileClass.Building];
 
-type Draw = { cls: TileClass; geometry: Geometry; widthM?: number };
+type Draw = { cls: TileClass; geometry: Geometry; widthM?: number; heightM?: number };
+
+/** 청크 계산 결과. 두 배열 모두 index = row * CHUNK_SIZE + col, row 0이 북쪽 줄 */
+export type ChunkData = {
+  classes: Uint8Array;
+  /** 건물 높이(m, 최대 255). 건물이 아닌 칸은 0 */
+  heights: Uint8Array;
+};
 
 /** 기본 지도의 벡터 소스 ID (스타일마다 이름이 달라서 찾아서 쓴다) */
 export function findVectorSourceId(map: MapLibreMap): string | null {
@@ -94,15 +101,15 @@ export function collectFeatures(map: MapLibreMap, sourceId: string): Draw[] {
     draws.push({ cls: TileClass.Road, geometry: f.geometry, widthM: width });
   }
   // 4) 건물 (가장 우선)
-  for (const f of q('building')) draws.push({ cls: TileClass.Building, geometry: f.geometry });
+  for (const f of q('building')) {
+    const height = Number(f.properties?.render_height ?? 0);
+    draws.push({ cls: TileClass.Building, geometry: f.geometry, heightM: Number.isFinite(height) ? height : 0 });
+  }
   return draws;
 }
 
-/**
- * 청크의 칸 종류를 계산한다.
- * 반환값: 길이 CHUNK_SIZE² 배열. index = row * CHUNK_SIZE + col, row 0이 북쪽(위) 줄이다.
- */
-export function classifyChunk(chunk: ChunkId, draws: Draw[]): Uint8Array {
+/** 청크의 칸 종류와 건물 높이를 계산한다. */
+export function classifyChunk(chunk: ChunkId, draws: Draw[]): ChunkData {
   const size = CHUNK_SIZE * SAMPLE_SCALE;
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -148,26 +155,28 @@ export function classifyChunk(chunk: ChunkId, draws: Draw[]): Uint8Array {
   const result = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE).fill(TileClass.Ground);
   const half = Math.floor(SAMPLE_SCALE / 2);
 
+  const drawShape = (g: Geometry, widthM?: number) => {
+    ctx.beginPath();
+    if (g.type === 'Polygon') {
+      tracePolygon(g.coordinates);
+      ctx.fill('evenodd');
+    } else if (g.type === 'MultiPolygon') {
+      g.coordinates.forEach(tracePolygon);
+      ctx.fill('evenodd');
+    } else if ((g.type === 'LineString' || g.type === 'MultiLineString') && widthM) {
+      if (g.type === 'LineString') traceLine(g.coordinates);
+      else g.coordinates.forEach(traceLine);
+      ctx.lineWidth = (widthM / realPerMercator) * pxPerM;
+      ctx.stroke();
+    }
+  };
+
   // 종류마다 따로 그려서(다른 종류와 색이 섞이지 않게) 칸 중심이 절반 이상 덮였는지 본다.
   // 한 캔버스에 여러 종류를 겹쳐 그리면, 경계의 부드럽게 섞인 색이 엉뚱한 종류로 읽혔다.
   for (const cls of CLASS_ORDER) {
     ctx.clearRect(0, 0, size, size);
     for (const d of draws) {
-      if (d.cls !== cls) continue;
-      const g = d.geometry;
-      ctx.beginPath();
-      if (g.type === 'Polygon') {
-        tracePolygon(g.coordinates);
-        ctx.fill('evenodd');
-      } else if (g.type === 'MultiPolygon') {
-        g.coordinates.forEach(tracePolygon);
-        ctx.fill('evenodd');
-      } else if ((g.type === 'LineString' || g.type === 'MultiLineString') && d.widthM) {
-        if (g.type === 'LineString') traceLine(g.coordinates);
-        else g.coordinates.forEach(traceLine);
-        ctx.lineWidth = (d.widthM / realPerMercator) * pxPerM;
-        ctx.stroke();
-      }
+      if (d.cls === cls) drawShape(d.geometry, d.widthM);
     }
 
     const data = ctx.getImageData(0, 0, size, size).data;
@@ -179,5 +188,25 @@ export function classifyChunk(chunk: ChunkId, draws: Draw[]): Uint8Array {
       }
     }
   }
-  return result;
+
+  // 건물 높이: 낮은 건물부터 높이 값을 빨강 채널로 그려서, 겹치면 높은 건물이 남게 한다.
+  const heights = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+  ctx.clearRect(0, 0, size, size);
+  const buildings = draws.filter((d) => d.cls === TileClass.Building).sort((a, b) => (a.heightM ?? 0) - (b.heightM ?? 0));
+  for (const d of buildings) {
+    ctx.fillStyle = `rgb(${Math.min(255, Math.round(d.heightM ?? 0))},0,0)`;
+    drawShape(d.geometry);
+  }
+  const hData = ctx.getImageData(0, 0, size, size).data;
+  for (let row = 0; row < CHUNK_SIZE; row++) {
+    for (let col = 0; col < CHUNK_SIZE; col++) {
+      const i = row * CHUNK_SIZE + col;
+      if (result[i] !== TileClass.Building) continue;
+      const px = col * SAMPLE_SCALE + half;
+      const py = row * SAMPLE_SCALE + half;
+      heights[i] = hData[(py * size + px) * 4]; // getImageData는 알파를 풀어 준 색을 돌려주므로 경계에서도 값이 유지된다
+    }
+  }
+
+  return { classes: result, heights };
 }

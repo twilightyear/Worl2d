@@ -8,8 +8,8 @@ const VARIANTS = 4;
 
 export type Sprites = {
   tiles: Record<TileClass, HTMLCanvasElement[]>;
-  /** 남쪽이 건물이 아닌 건물 칸: 지붕 끝 + 창문 있는 벽 */
-  wall: HTMLCanvasElement;
+  /** 건물 남쪽 앞면 벽. wall(처마, 바닥) — 처마: 벽 맨 윗줄, 바닥: 벽 맨 아랫줄 */
+  wall: (eaves: boolean, base: boolean) => HTMLCanvasElement;
 };
 
 // 시드가 같으면 항상 같은 무늬가 나오는 난수 (mulberry32)
@@ -106,17 +106,32 @@ function roof(seed: number) {
   });
 }
 
-function wall() {
+function wall(eaves: boolean, base: boolean) {
   return sprite((px) => {
-    px(0, 0, '#8c3e2f', S, 3); // 지붕 끝(처마)
-    px(0, 3, '#e6dcc8', S, S - 3); // 벽
-    // 창문
-    px(4, 6, '#3c4e66', 8, 6);
-    px(5, 7, '#6f9cc9', 6, 4);
-    px(5, 7, '#a9cfee', 2, 1);
-    px(7, 7, '#3c4e66', 1, 4); // 창살
-    px(0, S - 1, '#b6a68c', S, 1); // 벽 아래 그림자
+    px(0, 0, '#e6dcc8', S, S); // 벽
+    if (eaves) px(0, 0, '#8c3e2f', S, 3); // 지붕 끝(처마)
+    // 창문 (처마가 있으면 그만큼 아래로)
+    const top = eaves ? 6 : 4;
+    px(4, top, '#3c4e66', 8, 6);
+    px(5, top + 1, '#6f9cc9', 6, 4);
+    px(5, top + 1, '#a9cfee', 2, 1);
+    px(7, top + 1, '#3c4e66', 1, 4); // 창살
+    if (base) px(0, S - 1, '#b6a68c', S, 1); // 벽 아래 그림자
+    else px(0, S - 1, '#d6cab3', S, 1); // 층 구분선
   });
+}
+
+function wallSet() {
+  const cache = new Map<string, HTMLCanvasElement>();
+  return (eaves: boolean, base: boolean) => {
+    const k = `${eaves}-${base}`;
+    let c = cache.get(k);
+    if (!c) {
+      c = wall(eaves, base);
+      cache.set(k, c);
+    }
+    return c;
+  };
 }
 
 const variants = (make: (seed: number) => HTMLCanvasElement, base: number) =>
@@ -132,7 +147,7 @@ export function createSprites(): Sprites {
       [TileClass.Road]: variants(road, 4),
       [TileClass.Building]: variants(roof, 5),
     },
-    wall: wall(),
+    wall: wallSet(),
   };
 }
 
