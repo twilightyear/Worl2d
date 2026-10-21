@@ -11,6 +11,8 @@ export type TileStore = {
   get(x: number, y: number): TileClass | undefined;
   /** 건물 높이(m). 건물이 아니거나 계산 전이면 0 */
   height(x: number, y: number): number;
+  /** 건물 벽 색 0xRRGGBB. 건물이 아니거나 계산 전이면 0 */
+  color(x: number, y: number): number;
   /** 청크 데이터 (계산 전이면 undefined) */
   chunk(cx: number, cy: number): ChunkData | undefined;
 };
@@ -103,6 +105,10 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
     height(x, y) {
       const found = locate(x, y);
       return found ? found[0].heights[found[1]] : 0;
+    },
+    color(x, y) {
+      const found = locate(x, y);
+      return found ? found[0].colors[found[1]] : 0;
     },
     chunk(cx, cy) {
       return chunks.get(key(cx, cy));

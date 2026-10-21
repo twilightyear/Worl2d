@@ -72,6 +72,8 @@ export type Draw = {
   bbox: [number, number, number, number];
   widthM?: number;
   heightM?: number;
+  /** 건물 벽 색 0xRRGGBB (지도 데이터에 색이 있을 때만). 없으면 건물마다 대체 색을 고른다. */
+  color?: number;
 };
 
 /** 청크 계산 결과. 두 배열 모두 index = row * CHUNK_SIZE + col, row 0이 북쪽 줄 */
@@ -79,7 +81,48 @@ export type ChunkData = {
   classes: Uint8Array;
   /** 건물 높이(m, 최대 255). 건물이 아닌 칸은 0 */
   heights: Uint8Array;
+  /** 건물 벽 색 0xRRGGBB. 건물이 아닌 칸은 0 */
+  colors: Uint32Array;
 };
+
+/** 색 정보가 없는 건물에 쓸 건물 색 (건물마다 하나를 고정으로 고른다) */
+// 지붕 색이 서로 잘 구분되도록 색 계열(hue)이 다른 색으로 골랐다. (지붕은 벽 색 계열을 따라간다)
+const FALLBACK_BUILDING_COLORS = [
+  0xe8dcc8, // 베이지 → 갈색 지붕
+  0xb8c8d6, // 푸른 회색 → 파란 지붕
+  0xcfdcc0, // 연녹색 → 초록 지붕
+  0xe0b8b0, // 장밋빛 → 빨간 지붕
+  0xd6c8e0, // 라벤더 → 보라 지붕
+  0xe6d6a8, // 모래색 → 황토 지붕
+  0xc8d8d4, // 민트 회색 → 청록 지붕
+  0xdcdcdc, // 밝은 회색 → 회색 지붕
+];
+
+// 색 문자열(#rrggbb, 색 이름 등)을 숫자로 바꾸는 데 쓰는 캔버스. 브라우저가 해석하게 한다.
+let colorCtx: CanvasRenderingContext2D | null = null;
+function parseColor(value: unknown): number | null {
+  if (typeof value !== 'string' || !value) return null;
+  colorCtx ??= document.createElement('canvas').getContext('2d');
+  if (!colorCtx) return null;
+  colorCtx.fillStyle = '#010203'; // 해석에 실패하면 이 값이 그대로 남는다
+  colorCtx.fillStyle = value;
+  const out = colorCtx.fillStyle;
+  if (out === '#010203' || !out.startsWith('#')) return null;
+  return parseInt(out.slice(1, 7), 16);
+}
+
+/**
+ * 건물 하나(다각형 하나)의 대체 색. 첫 꼭짓점 좌표로 고르므로 같은 건물은 항상 같은 색이다.
+ * 지도 데이터는 높이·색이 같은 건물 수천 채를 묶음 도형(MultiPolygon) 하나로 보내므로,
+ * 도형 단위가 아니라 그 안의 다각형 단위로 골라야 건물마다 색이 달라진다.
+ */
+function fallbackColor(polygon: Position[][]): number {
+  const [lng, lat] = polygon[0]?.[0] ?? [0, 0];
+  const h = (Math.imul(Math.round(lng * 1e6), 73856093) ^ Math.imul(Math.round(lat * 1e6), 19349663)) >>> 0;
+  return FALLBACK_BUILDING_COLORS[h % FALLBACK_BUILDING_COLORS.length];
+}
+
+const hex = (color: number) => `#${color.toString(16).padStart(6, '0')}`;
 
 /** 기본 지도의 벡터 소스 ID (스타일마다 이름이 달라서 찾아서 쓴다) */
 export function findVectorSourceId(map: MapLibreMap): string | null {
@@ -166,7 +209,13 @@ export function collectFeatures(map: MapLibreMap, sourceId: string): Draw[] {
   // 4) 건물 (가장 우선)
   for (const f of q('building')) {
     const height = Number(f.properties?.render_height ?? 0);
-    draws.push({ cls: TileClass.Building, geometry: f.geometry, bbox: NO_BBOX, heightM: Number.isFinite(height) ? height : 0 });
+    draws.push({
+      cls: TileClass.Building,
+      geometry: f.geometry,
+      bbox: NO_BBOX,
+      heightM: Number.isFinite(height) ? height : 0,
+      color: parseColor(f.properties?.colour) ?? undefined,
+    });
   }
   // 선 폭은 실제 m라서 메르카토르로는 조금 더 넓다(서울 약 1.26배). 넉넉하게 2배로 잡는다.
   for (const d of draws) d.bbox = bboxOf(d.geometry, (d.widthM ?? 0) * 2);
@@ -200,8 +249,27 @@ export function classifyChunk(chunk: ChunkId, allDraws: Draw[]): ChunkData {
 
   // 캔버스보다 조금 넓은 사각형으로 잘라서 그린다 (경계 칸의 판단이 바뀌지 않게 여유를 둔다)
   const CLIP_PAD = SAMPLE_SCALE * 2;
+  // 청크(+여유) 범위를 경위도로 구해 두고, 범위 밖 고리는 좌표 변환 없이 건너뛴다.
+  // (묶음 도형에는 청크와 상관없는 건물이 수천 개 들어 있다)
+  const padM = CLIP_PAD / pxPerM;
+  const [west, south] = fromMercator(b.minX - padM, b.minY - padM);
+  const [east, north] = fromMercator(b.maxX + padM, b.maxY + padM);
+  const outside = (ring: Position[]) => {
+    let w = Infinity;
+    let s = Infinity;
+    let e = -Infinity;
+    let n = -Infinity;
+    for (const [lng, lat] of ring) {
+      if (lng < w) w = lng;
+      if (lng > e) e = lng;
+      if (lat < s) s = lat;
+      if (lat > n) n = lat;
+    }
+    return e < west || w > east || n < south || s > north;
+  };
   const tracePolygon = (rings: Position[][]) => {
     for (const ring of rings) {
+      if (outside(ring)) continue;
       const pts = clipRing(ring.map(toPx), -CLIP_PAD, size + CLIP_PAD);
       if (pts.length < 3) continue;
       pts.forEach(([x, y], i) => {
@@ -281,5 +349,53 @@ export function classifyChunk(chunk: ChunkId, allDraws: Draw[]): ChunkData {
     }
   }
 
-  return { classes: result, heights };
+  // 건물 색: 높이와 같은 순서(낮은 건물 → 높은 건물)로 칠해서, 겹치면 높은 건물 색이 남게 한다.
+  const colors = new Uint32Array(CHUNK_SIZE * CHUNK_SIZE);
+  ctx.clearRect(0, 0, size, size);
+  for (const d of buildings) {
+    const g = d.geometry;
+    if (d.color !== undefined) {
+      ctx.fillStyle = hex(d.color); // 지도 데이터의 실제 색
+      drawShape(g);
+    } else if (g.type === 'Polygon' || g.type === 'MultiPolygon') {
+      // 색 정보가 없으면 건물(다각형)마다 대체 색을 따로 고른다
+      for (const polygon of g.type === 'Polygon' ? [g.coordinates] : g.coordinates) {
+        ctx.beginPath();
+        tracePolygon(polygon);
+        ctx.fillStyle = hex(fallbackColor(polygon));
+        ctx.fill('evenodd');
+      }
+    }
+  }
+  // 붙어 있는 건물 경계에서는 두 색이 섞인 중간 색이 읽힌다. 실제로 칠한 색 중 가장 가까운 색으로 맞춘다.
+  // (중간 색이 그대로 남으면 색마다 지붕·벽 그림을 새로 만들어야 해서 화면이 멈칫했다)
+  const used = new Set<number>(FALLBACK_BUILDING_COLORS);
+  for (const d of buildings) if (d.color !== undefined) used.add(d.color);
+  const palette = [...used];
+  const nearest = (r: number, g: number, bl: number) => {
+    let best = palette[0];
+    let bestD = Infinity;
+    for (const c of palette) {
+      const dr = ((c >> 16) & 255) - r;
+      const dg = ((c >> 8) & 255) - g;
+      const db = (c & 255) - bl;
+      const dist = dr * dr + dg * dg + db * db;
+      if (dist < bestD) {
+        bestD = dist;
+        best = c;
+      }
+    }
+    return best;
+  };
+  const cData = ctx.getImageData(0, 0, size, size).data;
+  for (let row = 0; row < CHUNK_SIZE; row++) {
+    for (let col = 0; col < CHUNK_SIZE; col++) {
+      const i = row * CHUNK_SIZE + col;
+      if (result[i] !== TileClass.Building) continue;
+      const p = ((row * SAMPLE_SCALE + half) * size + col * SAMPLE_SCALE + half) * 4;
+      colors[i] = nearest(cData[p], cData[p + 1], cData[p + 2]);
+    }
+  }
+
+  return { classes: result, heights, colors };
 }

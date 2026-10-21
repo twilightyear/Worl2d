@@ -6,10 +6,19 @@ export const SPRITE_PX = 16;
 /** 칸 종류별 변형 그림 개수 (같은 종류도 칸마다 무늬를 조금씩 다르게) */
 const VARIANTS = 4;
 
+/** 건물 색 하나에 대한 그림 묶음 */
+export type BuildingSprites = {
+  roofs: HTMLCanvasElement[];
+  /** 옆면 벽. eaves: 벽 맨 윗줄(처마), base: 벽 맨 아랫줄(바닥 그림자) */
+  wall: (eaves: boolean, base: boolean) => HTMLCanvasElement;
+  /** 지붕 외곽선 색 */
+  outline: string;
+};
+
 export type Sprites = {
   tiles: Record<TileClass, HTMLCanvasElement[]>;
-  /** 건물 남쪽 앞면 벽. wall(처마, 바닥) — 처마: 벽 맨 윗줄, 바닥: 벽 맨 아랫줄 */
-  wall: (eaves: boolean, base: boolean) => HTMLCanvasElement;
+  /** 건물 색(0xRRGGBB)별 그림. 처음 쓰일 때 만들어 보관한다. */
+  building: (color: number) => BuildingSprites;
 };
 
 // 시드가 같으면 항상 같은 무늬가 나오는 난수 (mulberry32)
@@ -38,6 +47,18 @@ function sprite(draw: (px: (x: number, y: number, color: string, w?: number, h?:
 }
 
 const S = SPRITE_PX;
+
+/** 색을 밝게(amount > 0) 또는 어둡게(amount < 0) 한다. amount: -1 ~ 1 */
+function shade(color: number, amount: number): string {
+  const ch = (v: number) => {
+    const out = amount >= 0 ? v + (255 - v) * amount : v * (1 + amount);
+    return Math.max(0, Math.min(255, Math.round(out)));
+  };
+  const r = ch((color >> 16) & 255);
+  const g = ch((color >> 8) & 255);
+  const b = ch(color & 255);
+  return `rgb(${r},${g},${b})`;
+}
 
 /** 바탕색 위에 점을 흩뿌린다 */
 function speckled(seed: number, base: string, dots: [string, number][]) {
@@ -92,45 +113,88 @@ function road(seed: number) {
   ]);
 }
 
-function roof(seed: number) {
+/** 지붕: 기와 줄 무늬 */
+function roof(seed: number, base: number) {
   const r = rng(seed);
+  const fill = shade(base, 0);
+  const line = shade(base, -0.2);
+  const light = shade(base, 0.15);
   return sprite((px) => {
-    px(0, 0, '#bd5d47', S, S);
-    // 기와 줄: 4px마다 어두운 선, 줄마다 이음새 위치를 엇갈리게
+    px(0, 0, fill, S, S);
+    // 4px마다 어두운 선, 줄마다 이음새 위치를 엇갈리게
     for (let y = 3; y < S; y += 4) {
-      px(0, y, '#9c4836', S, 1);
+      px(0, y, line, S, 1);
       const offset = (y / 4) % 2 === 0 ? 0 : 4;
-      for (let x = offset; x < S; x += 8) px(x, y - 3, '#9c4836', 1, 3);
+      for (let x = offset; x < S; x += 8) px(x, y - 3, line, 1, 3);
     }
-    for (let i = 0; i < 4; i++) px(Math.floor(r() * S), Math.floor(r() * S), '#d4806a');
+    for (let i = 0; i < 4; i++) px(Math.floor(r() * S), Math.floor(r() * S), light);
   });
 }
 
-function wall(eaves: boolean, base: boolean) {
+/** 벽: 창문 한 줄 */
+function wall(eaves: boolean, base: boolean, wallColor: number, roofColor: number) {
   return sprite((px) => {
-    px(0, 0, '#e6dcc8', S, S); // 벽
-    if (eaves) px(0, 0, '#8c3e2f', S, 3); // 지붕 끝(처마)
+    px(0, 0, shade(wallColor, 0), S, S);
+    if (eaves) px(0, 0, shade(roofColor, -0.25), S, 3); // 지붕 끝(처마)
     // 창문 (처마가 있으면 그만큼 아래로)
     const top = eaves ? 6 : 4;
     px(4, top, '#3c4e66', 8, 6);
     px(5, top + 1, '#6f9cc9', 6, 4);
     px(5, top + 1, '#a9cfee', 2, 1);
     px(7, top + 1, '#3c4e66', 1, 4); // 창살
-    if (base) px(0, S - 1, '#b6a68c', S, 1); // 벽 아래 그림자
-    else px(0, S - 1, '#d6cab3', S, 1); // 층 구분선
+    px(0, S - 1, shade(wallColor, base ? -0.22 : -0.08), S, 1); // 바닥 그림자 / 층 구분선
   });
 }
 
-function wallSet() {
-  const cache = new Map<string, HTMLCanvasElement>();
-  return (eaves: boolean, base: boolean) => {
-    const k = `${eaves}-${base}`;
-    let c = cache.get(k);
-    if (!c) {
-      c = wall(eaves, base);
-      cache.set(k, c);
-    }
-    return c;
+/**
+ * 벽 색에서 지붕 색을 만든다. 색 계열(hue)은 유지하고 채도는 높이고 밝기는 중간으로.
+ * (어둡게만 하면 밝은 벽 색들이 모두 비슷한 어두운 색이 되어 지붕이 구분되지 않았다)
+ * 회색 계열(채도가 아주 낮은 색)은 회색 지붕으로 둔다.
+ */
+function roofColorOf(wallColor: number): number {
+  const r = ((wallColor >> 16) & 255) / 255;
+  const g = ((wallColor >> 8) & 255) / 255;
+  const b = (wallColor & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  const roofS = s < 0.08 ? 0 : 0.5;
+  const roofL = 0.42;
+  // HSL → RGB
+  const c = (1 - Math.abs(2 * roofL - 1)) * roofS;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = roofL - c / 2;
+  const [r1, g1, b1] =
+    h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  const to = (v: number) => Math.round((v + m) * 255);
+  return (to(r1) << 16) | (to(g1) << 8) | to(b1);
+}
+
+function buildingSet(color: number): BuildingSprites {
+  const roofColor = roofColorOf(color);
+  const walls = new Map<string, HTMLCanvasElement>();
+  return {
+    roofs: Array.from({ length: VARIANTS }, (_, i) => roof(5 + i * 7919, roofColor)),
+    wall: (eaves, base) => {
+      const k = `${eaves}-${base}`;
+      let c = walls.get(k);
+      if (!c) {
+        c = wall(eaves, base, color, roofColor);
+        walls.set(k, c);
+      }
+      return c;
+    },
+    outline: shade(roofColor, -0.45),
   };
 }
 
@@ -139,15 +203,24 @@ const variants = (make: (seed: number) => HTMLCanvasElement, base: number) =>
 
 /** 도트 타일 그림을 만든다. (외부 이미지 없이 코드로 생성한 원본 그림) */
 export function createSprites(): Sprites {
+  const buildings = new Map<number, BuildingSprites>();
   return {
     tiles: {
       [TileClass.Ground]: variants(ground, 1),
       [TileClass.Green]: variants(grass, 2),
       [TileClass.Water]: variants(water, 3),
       [TileClass.Road]: variants(road, 4),
-      [TileClass.Building]: variants(roof, 5),
+      // 건물 칸 자체는 그리지 않고(지붕·벽은 building()으로 그림), 기본값으로만 둔다.
+      [TileClass.Building]: variants((seed) => roof(seed, 0xbd5d47), 5),
     },
-    wall: wallSet(),
+    building(color) {
+      let set = buildings.get(color);
+      if (!set) {
+        set = buildingSet(color);
+        buildings.set(color, set);
+      }
+      return set;
+    },
   };
 }
 
