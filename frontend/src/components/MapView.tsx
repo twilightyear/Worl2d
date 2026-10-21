@@ -6,6 +6,7 @@ import { createTileRenderer, type TileRenderer } from '../game/renderer';
 import { tileAt, type TileId } from '../map/grid';
 import { addGridLayer, GRID_MIN_ZOOM, showSelectedTile } from '../map/gridLayer';
 import { addSampleLayer } from '../map/sampleLayer';
+import { isWalkable, TILE_CLASS_LABEL } from '../map/tileClass';
 import { createTileStore } from '../map/tileStore';
 
 // 환경변수가 없을 때 쓰는 기본값 (OpenFreeMap, 무료·키 없음)
@@ -16,8 +17,8 @@ const INITIAL_CENTER: [number, number] = [126.978, 37.5665];
 // 게임 화면 기준 줌. 줌 21에서 칸 하나가 화면에서 약 67px
 const INITIAL_ZOOM = 21;
 
-// 캐릭터 시작 칸: 서울시청 앞
-const START_TILE = tileAt(INITIAL_CENTER[0], INITIAL_CENTER[1]);
+// 캐릭터 시작 칸: 서울광장 잔디 (서울시청 좌표는 건물 안이라 갇힐 수 있다)
+const START_TILE = tileAt(126.97795, 37.5658);
 
 const DIRECTION_LABEL: Record<Direction, string> = { up: '↑', down: '↓', left: '←', right: '→' };
 
@@ -25,7 +26,7 @@ const DIRECTION_LABEL: Record<Direction, string> = { up: '↑', down: '↓', lef
 const COORD_DECIMALS = 6;
 
 type Clicked = { lng: number; lat: number; tile: TileId };
-type Player = { tile: TileId; facing: Direction };
+type Player = { tile: TileId; facing: Direction; ground: string };
 
 export default function MapView() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -77,7 +78,15 @@ export default function MapView() {
       renderer = createTileRenderer(map, store);
       destroyCharacter = createCharacter(map, {
         start: START_TILE,
-        onChange: (tile, facing) => setPlayer({ tile, facing }),
+        // 아직 계산하지 않은 칸(undefined)은 지나갈 수 있게 둔다. 막으면 데이터가 늦을 때 캐릭터가 멈춘다.
+        canEnter: (t) => {
+          const cls = store.get(t.x, t.y);
+          return cls === undefined || isWalkable(cls);
+        },
+        onChange: (tile, facing) => {
+          const cls = store.get(tile.x, tile.y);
+          setPlayer({ tile, facing, ground: cls === undefined ? '?' : TILE_CLASS_LABEL[cls] });
+        },
       });
     });
 
@@ -111,7 +120,7 @@ export default function MapView() {
       <div className="coord-panel">
         {player && (
           <div>
-            캐릭터 칸: {player.tile.x}, {player.tile.y} {DIRECTION_LABEL[player.facing]}
+            캐릭터 칸: {player.tile.x}, {player.tile.y} {DIRECTION_LABEL[player.facing]} ({player.ground})
           </div>
         )}
         <div>이동: 방향키 또는 WASD</div>

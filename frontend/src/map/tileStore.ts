@@ -20,8 +20,16 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
 
   const update = () => {
     if (!sourceId || map.getZoom() < GRID_MIN_ZOOM) return;
+    // 화면보다 사방으로 화면 절반만큼 넓게 미리 계산해 둔다. (걸어가는 쪽이 미리 준비되도록)
     const b = map.getBounds();
-    const pending: ChunkId[] = chunksInBounds(b.getWest(), b.getSouth(), b.getEast(), b.getNorth()).filter(
+    const padLng = (b.getEast() - b.getWest()) / 2;
+    const padLat = (b.getNorth() - b.getSouth()) / 2;
+    const pending: ChunkId[] = chunksInBounds(
+      b.getWest() - padLng,
+      b.getSouth() - padLat,
+      b.getEast() + padLng,
+      b.getNorth() + padLat,
+    ).filter(
       (c) => !chunks.has(key(c.cx, c.cy)),
     );
     if (pending.length === 0) return;
@@ -34,8 +42,10 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
     onUpdate();
   };
 
-  // 지도 이동과 데이터 로딩이 모두 끝난 시점(idle)에 계산한다.
+  // 데이터 로딩이 끝났을 때(idle)와, 캐릭터 이동처럼 지도가 계속 움직이는 중(moveend)에도 계산한다.
+  // 새로 계산할 청크가 없으면 바로 끝나므로 자주 호출해도 부담이 적다.
   map.on('idle', update);
+  map.on('moveend', update);
   update();
 
   return {

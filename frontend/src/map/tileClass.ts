@@ -12,6 +12,20 @@ export const TileClass = {
 } as const;
 export type TileClass = (typeof TileClass)[keyof typeof TileClass];
 
+/** 칸 종류 이름 (화면 표시용) */
+export const TILE_CLASS_LABEL: Record<TileClass, string> = {
+  [TileClass.Ground]: '땅',
+  [TileClass.Green]: '풀',
+  [TileClass.Water]: '물',
+  [TileClass.Road]: '도로',
+  [TileClass.Building]: '건물',
+};
+
+/** 캐릭터가 들어갈 수 있는 칸인지. 건물과 물은 막힌다. */
+export function isWalkable(cls: TileClass): boolean {
+  return cls !== TileClass.Building && cls !== TileClass.Water;
+}
+
 /** T1 임시 색상 (T2에서 도트 타일 그림으로 바꾼다) */
 export const TILE_CLASS_COLOR: Record<TileClass, string> = {
   [TileClass.Ground]: '#d9c9a0',

@@ -34,6 +34,8 @@ type Step = { from: Mercator; to: Mercator; target: TileId; startedAt: number };
 
 export type CharacterOptions = {
   start: TileId;
+  /** 이 칸으로 들어갈 수 있는지. 없으면 어디든 갈 수 있다. */
+  canEnter?: (tile: TileId) => boolean;
   /** 캐릭터가 새 칸에 도착하거나 방향을 바꿀 때 호출된다. */
   onChange?: (tile: TileId, facing: Direction) => void;
 };
@@ -124,7 +126,10 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): ()
         options.onChange?.(tile, facing);
       }
       const target = { x: tile.x + DELTA[dir].x, y: tile.y + DELTA[dir].y };
-      step = { from: tileCenter(tile), to: tileCenter(target), target, startedAt: now };
+      // 막힌 칸이면 그쪽을 바라보기만 하고 제자리에 있는다.
+      if (!options.canEnter || options.canEnter(target)) {
+        step = { from: tileCenter(tile), to: tileCenter(target), target, startedAt: now };
+      }
     }
 
     frame = requestAnimationFrame(loop);
