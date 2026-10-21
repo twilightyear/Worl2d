@@ -15,6 +15,8 @@ export type TileStore = {
   color(x: number, y: number): number;
   /** 청크 데이터 (계산 전이면 undefined) */
   chunk(cx: number, cy: number): ChunkData | undefined;
+  /** 새 청크가 계산될 때마다 1씩 커진다 (그림 캐시를 다시 만들지 판단할 때 쓴다) */
+  version(): number;
 };
 
 /**
@@ -30,6 +32,7 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
     if (e.sourceId === sourceId && e.tile) draws = null;
   });
   let scheduled = false;
+  let version = 0;
 
   const update = () => {
     if (!sourceId || map.getZoom() < GRID_MIN_ZOOM) return;
@@ -63,6 +66,7 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
     );
     const c = pending[0];
     chunks.set(key(c.cx, c.cy), classifyChunk(c, draws));
+    version++;
     onUpdate();
 
     // 남은 청크는 다음 프레임에 이어서 계산한다.
@@ -113,5 +117,6 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
     chunk(cx, cy) {
       return chunks.get(key(cx, cy));
     },
+    version: () => version,
   };
 }

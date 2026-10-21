@@ -5,6 +5,7 @@ import { TileClass } from '../map/tileClass';
 import type { TileStore } from '../map/tileStore';
 import type { CharacterState } from './character';
 import { createSprites, SPRITE_PX, variantOf, type BuildingSprites } from './sprites';
+import { connects, loadTileset, type Tileset } from './tileset';
 
 const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6378137;
 const WORLD_PX = 512; // MapLibre의 줌 0 세계 크기(px)
@@ -97,16 +98,45 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     return set[face];
   };
 
+  // 타일셋(Ninja Adventure)은 비동기로 불러온다. 불러오기 전에는 코드로 만든 그림을 쓴다.
+  let tileset: Tileset | null = null;
+  loadTileset()
+    .then((t) => {
+      tileset = t;
+      groundCache.clear(); // 새 그림으로 바닥을 다시 그리게
+      map.triggerRepaint();
+    })
+    .catch((err) => console.error(err));
+
+  /** 바닥 칸 그림. 타일셋이 있으면 이웃을 보고 오토타일을 고른다. */
+  const groundTile = (x: number, y: number, cls: TileClass): HTMLCanvasElement => {
+    if (!tileset) {
+      // 건물 칸의 바닥은 땅으로 깔아 두고, 건물은 그 위에 세운다.
+      const groundCls = cls === TileClass.Building ? TileClass.Ground : cls;
+      return sprites.tiles[groundCls][variantOf(x, y)];
+    }
+    if (cls === TileClass.Green) return tileset.grass[variantOf(x, y)];
+    const n = connects(cls, store.get(x, y + 1));
+    const e = connects(cls, store.get(x + 1, y));
+    const s = connects(cls, store.get(x, y - 1));
+    const w = connects(cls, store.get(x - 1, y));
+    if (cls === TileClass.Water) return tileset.water(n, e, s, w);
+    if (cls === TileClass.Road) return tileset.road(n, e, s, w);
+    return tileset.dirt(n, e, s, w); // 땅, 건물 바닥
+  };
+
   // 청크 바닥 그림 캐시: 칸마다 매 프레임 그리지 않고, 청크당 한 장을 미리 그려 두고 붙인다.
   // Map은 넣은 순서를 기억하므로, 쓸 때마다 맨 뒤로 옮기고 넘치면 맨 앞(가장 오래 안 쓴 것)을 지운다.
-  const groundCache = new Map<number, HTMLCanvasElement>();
+  // 오토타일은 옆 청크의 칸도 보므로, 옆 청크가 아직 없을 때 만든 그림은 나중에 다시 만든다.
+  type GroundEntry = { canvas: HTMLCanvasElement; complete: boolean; version: number };
+  const groundCache = new Map<number, GroundEntry>();
   const groundOf = (cx: number, cy: number): HTMLCanvasElement | undefined => {
     const k = cx * 1_000_000 + cy;
     const hit = groundCache.get(k);
-    if (hit) {
+    if (hit && (hit.complete || hit.version === store.version())) {
       groundCache.delete(k);
       groundCache.set(k, hit);
-      return hit;
+      return hit.canvas;
     }
     const data = store.chunk(cx, cy);
     if (!data) return undefined;
@@ -116,12 +146,17 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       for (let col = 0; col < CHUNK_SIZE; col++) {
         const x = cx * CHUNK_SIZE + col;
         const cls = data.classes[row * CHUNK_SIZE + col] as TileClass;
-        // 건물 칸의 바닥은 땅으로 깔아 두고, 건물은 그 위에 세운다.
-        const groundCls = cls === TileClass.Building ? TileClass.Ground : cls;
-        g.drawImage(sprites.tiles[groundCls][variantOf(x, y)], col * SPRITE_PX, row * SPRITE_PX);
+        g.drawImage(groundTile(x, y, cls), col * SPRITE_PX, row * SPRITE_PX);
       }
     }
-    groundCache.set(k, c);
+    const complete = [
+      [cx, cy + 1],
+      [cx + 1, cy],
+      [cx, cy - 1],
+      [cx - 1, cy],
+    ].every(([nx, ny]) => store.chunk(nx, ny) !== undefined);
+    groundCache.delete(k);
+    groundCache.set(k, { canvas: c, complete, version: store.version() });
     if (groundCache.size > GROUND_CACHE_MAX) groundCache.delete(groundCache.keys().next().value!);
     return c;
   };
@@ -274,13 +309,22 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     const tilePx = TILE_SIZE * k;
     const drawActor = () => {
       if (!actor) return;
-      // 임시 캐릭터 그림 (도트 캐릭터로 교체 예정): 발밑 그림자 + 몸
       const fx = PX(actor.pos[0]);
       const fy = PY(actor.pos[1]);
       ctx.fillStyle = 'rgba(0,0,0,0.25)';
       ctx.beginPath();
-      ctx.ellipse(fx, fy + tilePx * 0.25, tilePx * 0.35, tilePx * 0.14, 0, 0, Math.PI * 2);
+      ctx.ellipse(fx, fy + tilePx * 0.3, tilePx * 0.32, tilePx * 0.12, 0, 0, Math.PI * 2);
       ctx.fill();
+      if (tileset) {
+        // 캐릭터 시트: 열 = 방향(아래·위·왼쪽·오른쪽), 행 = 걷기 프레임(0~3). 멈춰 있으면 0행
+        const col = { down: 0, up: 1, left: 2, right: 3 }[actor.facing];
+        const row = actor.moving ? Math.floor(performance.now() / 125) % 4 : 0;
+        const size = Math.round(tilePx);
+        // 발이 칸 중심보다 약간 아래(남쪽)에 오도록 그린다
+        ctx.drawImage(tileset.character, col * 16, row * 16, 16, 16, Math.round(fx - size / 2), Math.round(fy + tilePx * 0.4 - size), size, size);
+        return;
+      }
+      // 타일셋을 불러오기 전 임시 그림: 몸
       const cy = fy - tilePx * 0.3;
       const r = tilePx * 0.38;
       ctx.fillStyle = '#ef4444';
