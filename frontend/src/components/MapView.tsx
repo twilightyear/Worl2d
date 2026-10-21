@@ -31,7 +31,7 @@ export default function MapView() {
       center: INITIAL_CENTER,
       zoom: INITIAL_ZOOM,
       minZoom: 2,
-      maxZoom: 21, // 칸(약 2m)을 크게 보려면 깊게 확대해야 한다.
+      maxZoom: 22, // 칸(약 2m)을 크게 보려면 깊게 확대해야 한다. 줌 22에서 칸 하나가 화면에서 약 134px
       // 포켓몬식 탑다운 화면: 회전과 기울기를 막아 북쪽이 항상 위, 격자가 항상 반듯하게 보이게 한다.
       maxPitch: 0,
       dragRotate: false,
