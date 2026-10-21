@@ -53,6 +53,9 @@ const ROAD_WIDTH_M: Record<string, number> = {
 };
 const WATERWAY_WIDTH_M = 3;
 
+/** collectFeatures 끝에서 실제 범위로 채운다 */
+const NO_BBOX: [number, number, number, number] = [0, 0, 0, 0];
+
 /** 칸 하나를 몇 px로 그려서 판단할지. 칸 중심 픽셀만 읽으므로 경계의 흐림(안티앨리어싱) 영향을 피한다. */
 const SAMPLE_SCALE = 4;
 
@@ -62,7 +65,14 @@ const COVER_THRESHOLD = 128;
 /** 칸 종류를 그리는 순서. 나중 종류가 우선한다. */
 const CLASS_ORDER: TileClass[] = [TileClass.Green, TileClass.Water, TileClass.Road, TileClass.Building];
 
-type Draw = { cls: TileClass; geometry: Geometry; widthM?: number; heightM?: number };
+/** 칸 판단용 도형. bbox = 메르카토르 범위 [minX, minY, maxX, maxY] (선은 폭만큼 넓힘) */
+export type Draw = {
+  cls: TileClass;
+  geometry: Geometry;
+  bbox: [number, number, number, number];
+  widthM?: number;
+  heightM?: number;
+};
 
 /** 청크 계산 결과. 두 배열 모두 index = row * CHUNK_SIZE + col, row 0이 북쪽 줄 */
 export type ChunkData = {
@@ -77,6 +87,59 @@ export function findVectorSourceId(map: MapLibreMap): string | null {
   return Object.keys(sources).find((id) => sources[id].type === 'vector') ?? null;
 }
 
+/**
+ * 다각형 고리를 사각형 [lo, hi]² 안으로 잘라낸다 (Sutherland–Hodgman).
+ * 청크 밖으로 길게 뻗은 넓은 면(공원, 물 등)을 그대로 그리면 꼭짓점이 많아 매우 느려서, 미리 잘라 둔다.
+ */
+function clipRing(ring: [number, number][], lo: number, hi: number): [number, number][] {
+  type P = [number, number];
+  const clipEdge = (pts: P[], inside: (p: P) => boolean, cross: (a: P, b: P) => P): P[] => {
+    const out: P[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const cur = pts[i];
+      const prev = pts[(i + pts.length - 1) % pts.length];
+      const curIn = inside(cur);
+      const prevIn = inside(prev);
+      if (curIn) {
+        if (!prevIn) out.push(cross(prev, cur));
+        out.push(cur);
+      } else if (prevIn) {
+        out.push(cross(prev, cur));
+      }
+    }
+    return out;
+  };
+  const atX = (x: number) => (a: P, b: P): P => [x, a[1] + ((b[1] - a[1]) * (x - a[0])) / (b[0] - a[0])];
+  const atY = (y: number) => (a: P, b: P): P => [a[0] + ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]), y];
+  let pts = ring;
+  pts = clipEdge(pts, (p) => p[0] >= lo, atX(lo));
+  if (pts.length) pts = clipEdge(pts, (p) => p[0] <= hi, atX(hi));
+  if (pts.length) pts = clipEdge(pts, (p) => p[1] >= lo, atY(lo));
+  if (pts.length) pts = clipEdge(pts, (p) => p[1] <= hi, atY(hi));
+  return pts;
+}
+
+/** 도형의 메르카토르 범위. margin(m)만큼 넓힌다. */
+function bboxOf(g: Geometry, margin: number): [number, number, number, number] {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const visit = (c: unknown): void => {
+    if (typeof (c as number[])[0] === 'number') {
+      const [x, y] = toMercator((c as number[])[0], (c as number[])[1]);
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    } else {
+      (c as unknown[]).forEach(visit);
+    }
+  };
+  if ('coordinates' in g) visit(g.coordinates);
+  return [minX - margin, minY - margin, maxX + margin, maxY + margin];
+}
+
 /** 현재 불러온 지도 데이터에서 칸 종류 판단에 쓸 도형을 그리는 순서대로 모은다. */
 export function collectFeatures(map: MapLibreMap, sourceId: string): Draw[] {
   const q = (sourceLayer: string): GeoJSONFeature[] =>
@@ -85,32 +148,39 @@ export function collectFeatures(map: MapLibreMap, sourceId: string): Draw[] {
 
   const draws: Draw[] = [];
   // 1) 녹지
-  for (const f of q('landcover')) if (GREEN_LANDCOVER.has(cls(f))) draws.push({ cls: TileClass.Green, geometry: f.geometry });
-  for (const f of q('landuse')) if (GREEN_LANDUSE.has(cls(f))) draws.push({ cls: TileClass.Green, geometry: f.geometry });
-  for (const f of q('park')) draws.push({ cls: TileClass.Green, geometry: f.geometry });
+  for (const f of q('landcover')) if (GREEN_LANDCOVER.has(cls(f))) draws.push({ cls: TileClass.Green, geometry: f.geometry, bbox: NO_BBOX });
+  for (const f of q('landuse')) if (GREEN_LANDUSE.has(cls(f))) draws.push({ cls: TileClass.Green, geometry: f.geometry, bbox: NO_BBOX });
+  for (const f of q('park')) draws.push({ cls: TileClass.Green, geometry: f.geometry, bbox: NO_BBOX });
   // 2) 물
-  for (const f of q('water')) draws.push({ cls: TileClass.Water, geometry: f.geometry });
+  for (const f of q('water')) draws.push({ cls: TileClass.Water, geometry: f.geometry, bbox: NO_BBOX });
   for (const f of q('waterway')) {
     if (f.properties?.brunnel === 'tunnel') continue; // 땅속 수로(복개천)는 제외
-    draws.push({ cls: TileClass.Water, geometry: f.geometry, widthM: WATERWAY_WIDTH_M });
+    draws.push({ cls: TileClass.Water, geometry: f.geometry, bbox: NO_BBOX, widthM: WATERWAY_WIDTH_M });
   }
   // 3) 도로 (지하 도로는 제외)
   for (const f of q('transportation')) {
     const width = ROAD_WIDTH_M[cls(f)];
     if (!width || f.properties?.brunnel === 'tunnel') continue;
-    draws.push({ cls: TileClass.Road, geometry: f.geometry, widthM: width });
+    draws.push({ cls: TileClass.Road, geometry: f.geometry, bbox: NO_BBOX, widthM: width });
   }
   // 4) 건물 (가장 우선)
   for (const f of q('building')) {
     const height = Number(f.properties?.render_height ?? 0);
-    draws.push({ cls: TileClass.Building, geometry: f.geometry, heightM: Number.isFinite(height) ? height : 0 });
+    draws.push({ cls: TileClass.Building, geometry: f.geometry, bbox: NO_BBOX, heightM: Number.isFinite(height) ? height : 0 });
   }
+  // 선 폭은 실제 m라서 메르카토르로는 조금 더 넓다(서울 약 1.26배). 넉넉하게 2배로 잡는다.
+  for (const d of draws) d.bbox = bboxOf(d.geometry, (d.widthM ?? 0) * 2);
   return draws;
 }
 
 /** 청크의 칸 종류와 건물 높이를 계산한다. */
-export function classifyChunk(chunk: ChunkId, draws: Draw[]): ChunkData {
+export function classifyChunk(chunk: ChunkId, allDraws: Draw[]): ChunkData {
   const size = CHUNK_SIZE * SAMPLE_SCALE;
+  const cb = chunkBounds(chunk);
+  // 청크와 겹치는 도형만 그린다. (그 일대 도형 전부를 그리던 것이 가장 큰 병목이었다)
+  const draws = allDraws.filter(
+    ({ bbox: [x0, y0, x1, y1] }) => x1 >= cb.minX && x0 <= cb.maxX && y1 >= cb.minY && y0 <= cb.maxY,
+  );
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
@@ -128,10 +198,13 @@ export function classifyChunk(chunk: ChunkId, draws: Draw[]): ChunkData {
     return [(mx - b.minX) * pxPerM, (b.maxY - my) * pxPerM]; // 캔버스는 y가 아래로 증가
   };
 
+  // 캔버스보다 조금 넓은 사각형으로 잘라서 그린다 (경계 칸의 판단이 바뀌지 않게 여유를 둔다)
+  const CLIP_PAD = SAMPLE_SCALE * 2;
   const tracePolygon = (rings: Position[][]) => {
     for (const ring of rings) {
-      ring.forEach((p, i) => {
-        const [x, y] = toPx(p);
+      const pts = clipRing(ring.map(toPx), -CLIP_PAD, size + CLIP_PAD);
+      if (pts.length < 3) continue;
+      pts.forEach(([x, y], i) => {
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       });
