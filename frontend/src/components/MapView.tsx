@@ -99,7 +99,9 @@ export default function MapView() {
         enter: (from, to, z) => stepLevel(s, from, to, z),
         onChange: (tile, facing, z) => {
           const cls = s.get(tile.x, tile.y);
-          const ground = resolveZ(s, tile.x, tile.y, z) >= 1 ? '다리 위' : cls === undefined ? '?' : TILE_CLASS_LABEL[cls];
+          const elev = s.elevation(tile.x, tile.y);
+          const where = resolveZ(s, tile.x, tile.y, z) >= 1 ? '다리 위' : cls === undefined ? '?' : TILE_CLASS_LABEL[cls];
+          const ground = elev === undefined ? where : `${where} · 해발 ${Math.round(elev)}m, ${s.level(tile.x, tile.y)}층`;
           setPlayer({ tile, facing, ground });
         },
       });

@@ -6,7 +6,7 @@ import type { TileStore } from '../map/tileStore';
 import type { CharacterState } from './character';
 import { createSprites, roofColorOf, SPRITE_PX, variantOf } from './sprites';
 import { hash, isSidewalk, objectAt } from './placement';
-import { DECK_M, deckHeightM, resolveZ, surfaceM } from './levels';
+import { DECK_M, deckHeightM, isLedge, isStairs, resolveZ, stairsDown, surfaceM } from './levels';
 import { connects, loadTileset, tint, type Tileset } from './tileset';
 
 const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6378137;
@@ -197,16 +197,80 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     return tileset.paving[0]; // 그 밖의 땅, 건물 바닥: 보도블록
   };
 
+  /**
+   * 지형 층 표시 (바닥 그림 위에 덧그린다). 칸 안쪽 가장자리에만 그려서 이웃 칸 그림을 침범하지 않는다.
+   * - 풀밭 턱(절벽): 아래층 쪽 가장자리에 흙·바위 면 (남쪽이 낮으면 두껍게 = 정면에서 보이는 절벽)
+   * - 보도블록 단차: 아래층 쪽 가장자리에 얇은 턱 선
+   * - 계단: 내려가는 방향에 수직인 줄무늬
+   */
+  const decorate = (g: CanvasRenderingContext2D, x: number, y: number, cls: TileClass, px: number, py: number) => {
+    if (cls === TileClass.Water || cls === TileClass.Building) return;
+    const l = store.level(x, y);
+    if (l === undefined) return;
+    const S = SPRITE_PX;
+    const rect = (color: string, rx: number, ry: number, w: number, h: number) => {
+      g.fillStyle = color;
+      g.fillRect(px + rx, py + ry, w, h);
+    };
+    if (isStairs(store, x, y)) {
+      const [dx] = stairsDown(store, x, y);
+      rect('#b9b2a6', 0, 0, S, S);
+      for (let i = 0; i < S; i += 4) {
+        if (dx === 0) {
+          rect('#d8d2c6', 0, i, S, 1);
+          rect('#7d776d', 0, i + 3, S, 1);
+        } else {
+          rect('#d8d2c6', i, 0, 1, S);
+          rect('#7d776d', i + 3, 0, 1, S);
+        }
+      }
+      return;
+    }
+    for (const [dx, dy] of [[0, -1], [0, 1], [1, 0], [-1, 0]] as const) {
+      const n = store.level(x + dx, y + dy);
+      if (n === undefined || n >= l) continue;
+      if (isLedge(store, x, y, x + dx, y + dy)) {
+        if (dy === -1) {
+          // 남쪽이 낮다: 절벽 정면
+          rect('#a07c52', 0, S - 5, S, 5);
+          rect('#cfae7c', 0, S - 5, S, 1);
+          rect('#7f603f', 4, S - 3, 1, 2);
+          rect('#7f603f', 11, S - 4, 1, 2);
+          rect('#5e4630', 0, S - 1, S, 1);
+        } else if (dy === 1) {
+          rect('#5e4630', 0, 0, S, 1);
+          rect('#8a6a45', 0, 1, S, 1);
+        } else if (dx === 1) {
+          rect('#8a6a45', S - 2, 0, 2, S);
+          rect('#5e4630', S - 1, 0, 1, S);
+        } else {
+          rect('#8a6a45', 0, 0, 2, S);
+          rect('#5e4630', 0, 0, 1, S);
+        }
+      } else if (cls === TileClass.Ground && store.get(x + dx, y + dy) === TileClass.Ground) {
+        const dark = 'rgba(0,0,0,0.3)';
+        const light = 'rgba(255,255,255,0.35)';
+        if (dy === -1) {
+          rect(light, 0, S - 2, S, 1);
+          rect(dark, 0, S - 1, S, 1);
+        } else if (dy === 1) rect(dark, 0, 0, S, 1);
+        else if (dx === 1) rect(dark, S - 1, 0, 1, S);
+        else rect(dark, 0, 0, 1, S);
+      }
+    }
+  };
+
   // 청크 바닥 그림 캐시: 칸마다 매 프레임 그리지 않고, 청크당 한 장을 미리 그려 두고 붙인다.
   // Map은 넣은 순서를 기억하므로, 쓸 때마다 맨 뒤로 옮기고 넘치면 맨 앞(가장 오래 안 쓴 것)을 지운다.
   // 오토타일은 옆 청크의 칸도 보므로, 옆 청크가 아직 없을 때 만든 그림은 나중에 다시 만든다.
-  type GroundEntry = { canvas: HTMLCanvasElement; complete: boolean; version: number; data: unknown };
+  type GroundEntry = { canvas: HTMLCanvasElement; complete: boolean; version: number; data: unknown; terrain: number };
   const groundCache = new Map<number, GroundEntry>();
   const groundOf = (cx: number, cy: number): HTMLCanvasElement | undefined => {
     const k = cx * 1_000_000 + cy;
     const hit = groundCache.get(k);
     // 청크 데이터가 다시 계산되어 바뀌었으면(임시 → 정식) 그림도 다시 만든다.
-    if (hit && hit.data === store.chunk(cx, cy) && (hit.complete || hit.version === store.version())) {
+    // 지형 데이터가 새로 들어오면(층 표시가 바뀌므로) 다시 만든다.
+    if (hit && hit.data === store.chunk(cx, cy) && hit.terrain === store.terrainVersion() && (hit.complete || hit.version === store.version())) {
       groundCache.delete(k);
       groundCache.set(k, hit);
       return hit.canvas;
@@ -220,6 +284,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
         const x = cx * CHUNK_SIZE + col;
         const cls = data.classes[row * CHUNK_SIZE + col] as TileClass;
         g.drawImage(groundTile(x, y, cls), col * SPRITE_PX, row * SPRITE_PX);
+        decorate(g, x, y, cls, col * SPRITE_PX, row * SPRITE_PX);
       }
     }
     const complete = [
@@ -229,7 +294,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       [cx - 1, cy],
     ].every(([nx, ny]) => store.chunk(nx, ny) !== undefined);
     groundCache.delete(k);
-    groundCache.set(k, { canvas: c, complete, version: store.version(), data });
+    groundCache.set(k, { canvas: c, complete, version: store.version(), data, terrain: store.terrainVersion() });
     if (groundCache.size > GROUND_CACHE_MAX) groundCache.delete(groundCache.keys().next().value!);
     return c;
   };
