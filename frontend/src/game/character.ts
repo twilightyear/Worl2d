@@ -28,7 +28,7 @@ const STEP_MS = 250;
 
 export type Mercator = [number, number];
 
-type Step = { from: Mercator; to: Mercator; target: TileId; startedAt: number };
+type Step = { from: Mercator; to: Mercator; target: TileId; z: number; startedAt: number };
 
 /** 렌더러가 캐릭터를 그릴 때 쓰는 현재 상태 */
 export type CharacterState = {
@@ -36,18 +36,25 @@ export type CharacterState = {
   pos: Mercator;
   facing: Direction;
   moving: boolean;
+  /** 지금 칸과 층 (이동 중이면 출발한 칸) */
+  tile: TileId;
+  z: number;
+  /** 이동 중이면 도착할 칸·층과 진행률(0~1) */
+  next: { tile: TileId; z: number; t: number } | null;
 };
 
 export type CharacterOptions = {
   start: TileId;
-  /** 이 칸으로 들어갈 수 있는지. 없으면 어디든 갈 수 있다. */
-  canEnter?: (tile: TileId) => boolean;
+  /** from(층 z)에서 to로 갈 때 도착하는 층. 갈 수 없으면 null. 없으면 어디든 같은 층으로 간다. */
+  enter?: (from: TileId, to: TileId, z: number) => number | null;
   /** 캐릭터가 새 칸에 도착하거나 방향을 바꿀 때 호출된다. */
-  onChange?: (tile: TileId, facing: Direction) => void;
+  onChange?: (tile: TileId, facing: Direction, z: number) => void;
 };
 
 export type Character = {
   getState(): CharacterState;
+  /** 그 칸으로 바로 옮긴다 (땅 층으로. 다리 위 판단은 levels.resolveZ가 한다) */
+  teleport(tile: TileId): void;
   destroy(): void;
 };
 
@@ -64,6 +71,7 @@ const tileCenter = (tile: TileId): Mercator => [
 export function createCharacter(map: MapLibreMap, options: CharacterOptions): Character {
   let tile: TileId = { ...options.start };
   let facing: Direction = 'down';
+  let z = 0;
   let step: Step | null = null;
   let pos: Mercator = tileCenter(tile);
   const held: Direction[] = []; // 누르고 있는 방향들. 마지막에 누른 방향이 우선
@@ -107,8 +115,9 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): Ch
       ]);
       if (t === 1) {
         tile = step.target;
+        z = step.z;
         step = null;
-        options.onChange?.(tile, facing);
+        options.onChange?.(tile, facing, z);
       }
     }
 
@@ -119,13 +128,14 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): Ch
       queued = null;
       if (dir !== facing) {
         facing = dir;
-        options.onChange?.(tile, facing);
+        options.onChange?.(tile, facing, z);
         map.triggerRepaint(); // 제자리에서 방향만 바뀌어도 다시 그린다
       }
       const target = { x: tile.x + DELTA[dir].x, y: tile.y + DELTA[dir].y };
       // 막힌 칸이면 그쪽을 바라보기만 하고 제자리에 있는다.
-      if (!options.canEnter || options.canEnter(target)) {
-        step = { from: tileCenter(tile), to: tileCenter(target), target, startedAt: now };
+      const nz = options.enter ? options.enter(tile, target, z) : z;
+      if (nz !== null) {
+        step = { from: tileCenter(tile), to: tileCenter(target), target, z: nz, startedAt: now };
       }
     }
 
@@ -133,7 +143,7 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): Ch
   };
 
   place(pos);
-  options.onChange?.(tile, facing);
+  options.onChange?.(tile, facing, z);
 
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
@@ -141,7 +151,22 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): Ch
   frame = requestAnimationFrame(loop);
 
   return {
-    getState: () => ({ pos, facing, moving: step !== null }),
+    getState: () => ({
+      pos,
+      facing,
+      moving: step !== null,
+      tile,
+      z,
+      next: step ? { tile: step.target, z: step.z, t: Math.min(1, (performance.now() - step.startedAt) / STEP_MS) } : null,
+    }),
+    teleport(target) {
+      step = null;
+      queued = null;
+      tile = { ...target };
+      z = 0;
+      place(tileCenter(tile));
+      options.onChange?.(tile, facing, z);
+    },
     destroy() {
       cancelAnimationFrame(frame);
       window.removeEventListener('keydown', onKeyDown);
