@@ -60,20 +60,11 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
   };
   let scheduled = false;
   let version = 0;
+  /** 덮는 데이터 타일이 다 있기 전에 화면에 보여 주려고 임시로 계산한 청크 */
+  const provisional = new Set<number>();
 
   const update = () => {
     if (!sourceId || map.getZoom() < GRID_MIN_ZOOM) return;
-    // 화면보다 사방으로 화면 절반만큼 넓게 미리 계산해 둔다. (걸어가는 쪽이 미리 준비되도록)
-    const b = map.getBounds();
-    const padLng = (b.getEast() - b.getWest()) / 2;
-    const padLat = (b.getNorth() - b.getSouth()) / 2;
-    const pending: ChunkId[] = chunksInBounds(
-      b.getWest() - padLng,
-      b.getSouth() - padLat,
-      b.getEast() + padLng,
-      b.getNorth() + padLat,
-    ).filter((c) => !chunks.has(key(c.cx, c.cy)) && covered(c));
-    if (pending.length === 0) return;
 
     // 지금 화면의 지도 데이터가 다 들어오기 전에는 계산하지 않는다.
     // (멀리 이동한 직후에는 예전 지역 데이터만 있어서, 새 청크가 전부 '땅'으로 계산되어 버렸다)
@@ -81,12 +72,35 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
 
     // 지금 화면을 덮는 데이터 타일은 확실히 받아져 있다. (처음 로딩 때처럼 기록을 시작하기 전에
     // 받은 타일이 있을 수 있어서, 여기서도 기록해 둔다)
-    {
-      const v = map.getBounds();
-      const [vx0, vy0] = toMercator(v.getWest(), v.getSouth());
-      const [vx1, vy1] = toMercator(v.getEast(), v.getNorth());
-      for (const k of tilesFor(vx0, vy0, vx1, vy1)) loadedTiles.add(k);
-    }
+    const b = map.getBounds();
+    const [vx0, vy0] = toMercator(b.getWest(), b.getSouth());
+    const [vx1, vy1] = toMercator(b.getEast(), b.getNorth());
+    for (const k of tilesFor(vx0, vy0, vx1, vy1)) loadedTiles.add(k);
+
+    // 화면에 보이는 청크인지 (보이는 부분은 데이터가 확실히 있다)
+    const visible = (c: ChunkId) => {
+      const cb = chunkBounds(c);
+      return cb.maxX > vx0 && cb.minX < vx1 && cb.maxY > vy0 && cb.minY < vy1;
+    };
+
+    // 계산할 청크:
+    // - 아직 없는 청크 중, 덮는 데이터 타일이 다 있거나(정식) 화면에 보이는 것(임시)
+    //   (화면에 보이는데 옆 데이터 타일이 화면 밖이라 안 받아지면, 기다리기만 해서는 영영 빈칸으로 남는다)
+    // - 임시로 계산해 둔 청크 중, 이제 덮는 데이터 타일이 다 받아진 것(정식으로 다시 계산)
+    // 화면보다 사방으로 화면 절반만큼 넓게 미리 계산해 둔다. (걸어가는 쪽이 미리 준비되도록)
+    const padLng = (b.getEast() - b.getWest()) / 2;
+    const padLat = (b.getNorth() - b.getSouth()) / 2;
+    const pending: ChunkId[] = chunksInBounds(
+      b.getWest() - padLng,
+      b.getSouth() - padLat,
+      b.getEast() + padLng,
+      b.getNorth() + padLat,
+    ).filter((c) => {
+      const k = key(c.cx, c.cy);
+      if (!chunks.has(k)) return covered(c) || visible(c);
+      return provisional.has(k) && covered(c);
+    });
+    if (pending.length === 0) return;
 
     if (!draws) draws = collectFeatures(map, sourceId);
     if (draws.length === 0) {
@@ -101,7 +115,10 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
       (a, b) => Math.hypot(a.cx - here.cx, a.cy - here.cy) - Math.hypot(b.cx - here.cx, b.cy - here.cy),
     );
     const c = pending[0];
-    chunks.set(key(c.cx, c.cy), classifyChunk(c, draws));
+    const k = key(c.cx, c.cy);
+    chunks.set(k, classifyChunk(c, draws));
+    if (covered(c)) provisional.delete(k);
+    else provisional.add(k); // 화면 밖 부분은 데이터가 없어 틀릴 수 있다. 나중에 다시 계산한다
     version++;
     onUpdate();
 

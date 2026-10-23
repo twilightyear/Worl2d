@@ -29,8 +29,13 @@ const HEIGHT_SCALE = 0.35;
 const MAX_RENDER_M = 30;
 /** 벽 그림 한 장(창문 한 줄)이 나타내는 높이(m, 압축된 높이 기준) */
 const WALL_ROW_M = 3;
-/** 칸이 화면에서 이보다 작으면(px) 벽을 그림 대신 단색으로 그린다 (성능) */
-const TEXTURE_MIN_TILE_PX = 24;
+// ---- 그림자 -------------------------------------------------------------------
+/** 그림자 길이 = 그리는 높이 × 이 비율 (남동쪽으로) */
+const SHADOW_RATIO = 0.6;
+/** 그림자 최대 길이(칸) */
+const SHADOW_MAX_TILES = 4;
+/** 그림자 진하기 */
+const SHADOW_ALPHA = 0.22;
 
 // ---- 바닥 캐시 ----------------------------------------------------------------
 /** 청크 바닥 그림을 몇 장까지 보관할지 (한 장 = 1024×1024px ≈ 4MB) */
@@ -131,12 +136,13 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
   // 청크 바닥 그림 캐시: 칸마다 매 프레임 그리지 않고, 청크당 한 장을 미리 그려 두고 붙인다.
   // Map은 넣은 순서를 기억하므로, 쓸 때마다 맨 뒤로 옮기고 넘치면 맨 앞(가장 오래 안 쓴 것)을 지운다.
   // 오토타일은 옆 청크의 칸도 보므로, 옆 청크가 아직 없을 때 만든 그림은 나중에 다시 만든다.
-  type GroundEntry = { canvas: HTMLCanvasElement; complete: boolean; version: number };
+  type GroundEntry = { canvas: HTMLCanvasElement; complete: boolean; version: number; data: unknown };
   const groundCache = new Map<number, GroundEntry>();
   const groundOf = (cx: number, cy: number): HTMLCanvasElement | undefined => {
     const k = cx * 1_000_000 + cy;
     const hit = groundCache.get(k);
-    if (hit && (hit.complete || hit.version === store.version())) {
+    // 청크 데이터가 다시 계산되어 바뀌었으면(임시 → 정식) 그림도 다시 만든다.
+    if (hit && hit.data === store.chunk(cx, cy) && (hit.complete || hit.version === store.version())) {
       groundCache.delete(k);
       groundCache.set(k, hit);
       return hit.canvas;
@@ -159,7 +165,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       [cx - 1, cy],
     ].every(([nx, ny]) => store.chunk(nx, ny) !== undefined);
     groundCache.delete(k);
-    groundCache.set(k, { canvas: c, complete, version: store.version() });
+    groundCache.set(k, { canvas: c, complete, version: store.version(), data });
     if (groundCache.size > GROUND_CACHE_MAX) groundCache.delete(groundCache.keys().next().value!);
     return c;
   };
@@ -168,8 +174,18 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
   canvas.className = 'game-canvas';
   // 지도 캔버스 바로 뒤에 넣는다. 마커(캐릭터)는 그보다 뒤에 있어서 게임 화면 위에 보인다.
   map.getCanvas().after(canvas);
-  const ctx = canvas.getContext('2d');
+  const screenCtx = canvas.getContext('2d');
+  if (!screenCtx) throw new Error('canvas 2d context를 만들 수 없습니다');
+
+  // 도트 해상도(칸당 16px)로 먼저 그리는 캔버스. 다 그린 뒤 정수 배율로 키워 화면에 붙인다.
+  // 그러면 바닥·벽·캐릭터의 도트 크기가 모두 같아져서 진짜 도트 그림처럼 보인다.
+  const lowCanvas = document.createElement('canvas');
+  const ctx = lowCanvas.getContext('2d');
   if (!ctx) throw new Error('canvas 2d context를 만들 수 없습니다');
+  // 그림자를 한 번에 반투명하게 얹기 위한 캔버스 (겹친 그림자가 더 진해지지 않게)
+  const shadowCanvas = document.createElement('canvas');
+  const shadowCtx = shadowCanvas.getContext('2d');
+  if (!shadowCtx) throw new Error('canvas 2d context를 만들 수 없습니다');
 
   let visible = true;
   let selected: TileId | null = null;
@@ -184,27 +200,52 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     canvas.style.height = `${h}px`;
   };
 
-  const draw = () => {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!visible || map.getZoom() < GRID_MIN_ZOOM) return;
-    ctx.imageSmoothingEnabled = false; // 도트가 흐려지지 않게
+  /** 화면 px 기준, 메르카토르 1m가 몇 px인지 */
+  const screenScale = (zoom: number) =>
+    ((WORLD_PX * 2 ** zoom) / EARTH_CIRCUMFERENCE) * (canvas.width / map.getContainer().clientWidth);
 
-    const W = canvas.width;
-    const H = canvas.height;
-    const dpr = W / map.getContainer().clientWidth;
-    const k = ((WORLD_PX * 2 ** map.getZoom()) / EARTH_CIRCUMFERENCE) * dpr; // 메르카토르 m → 캔버스 px
+  const draw = () => {
+    screenCtx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!visible || map.getZoom() < GRID_MIN_ZOOM) return;
+
+    // 도트 1px = 화면 S px (정수). 줌이 딱 맞지 않을 때(확대·축소 중)는 가장 가까운 정수로.
+    const kScreen = screenScale(map.getZoom());
+    const S = Math.max(1, Math.round((TILE_SIZE * kScreen) / SPRITE_PX));
+    const k = kScreen / S; // 도트 해상도 기준, 메르카토르 1m = k px (칸 하나 ≈ 16px)
+
+    const W = Math.ceil(canvas.width / S) + 2;
+    const H = Math.ceil(canvas.height / S) + 2;
+    if (lowCanvas.width !== W || lowCanvas.height !== H) {
+      lowCanvas.width = W;
+      lowCanvas.height = H;
+      shadowCanvas.width = W;
+      shadowCanvas.height = H;
+    }
+    ctx.clearRect(0, 0, W, H);
+    ctx.imageSmoothingEnabled = false; // 도트가 흐려지지 않게
+    const OX = Math.floor(W / 2);
+    const OY = Math.floor(H / 2);
+
+    // 카메라를 도트 격자에 맞춘다. 남는 소수 부분(fx, fy)은 화면에 붙일 때 화면 px 단위로 옮긴다.
+    // (그래야 걸을 때 도트가 흔들리지 않으면서도 화면은 부드럽게 움직인다)
     const c = map.getCenter();
-    const [cmx, cmy] = toMercator(c.lng, c.lat);
+    const [trueX, trueY] = toMercator(c.lng, c.lat);
+    const ix = Math.floor(trueX * k);
+    const iy = Math.floor(trueY * k);
+    const fx = trueX * k - ix;
+    const fy = trueY * k - iy;
+    const cmx = ix / k;
+    const cmy = iy / k;
     const realPerMerc = Math.cos((c.lat * Math.PI) / 180); // 메르카토르 1m = 실제 몇 m
-    const textured = TILE_SIZE * k >= TEXTURE_MIN_TILE_PX;
+    const textured = true;
     const wallRowMerc = WALL_ROW_M / realPerMerc;
 
     // 높이 h(메르카토르 m)에 있는 점의 화면 좌표.
     // 높을수록 화면 위로 솟고(비스듬한 시점), 아주 약하게 화면 중심에서 바깥으로 밀린다(원근).
     // 바닥(h = 0)은 MapLibre 지도와 정확히 같은 위치다. (클릭·충돌·격자가 그대로 맞는다)
     const scale = (h: number) => CAMERA_HEIGHT / (CAMERA_HEIGHT - h);
-    const PX = (mx: number, h = 0) => W / 2 + (mx - cmx) * k * scale(h);
-    const PY = (my: number, h = 0) => H / 2 - (my - cmy) * k * scale(h) - h * TILT * k;
+    const PX = (mx: number, h = 0) => OX + (mx - cmx) * k * scale(h);
+    const PY = (my: number, h = 0) => OY - (my - cmy) * k * scale(h) - h * TILT * k;
 
     // 그릴 건물 높이(메르카토르 m). 건물이 아니면 0
     const heightAt = (x: number, y: number) => {
@@ -266,6 +307,26 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       items.push({ kind: 'actor', d: dist2(actor.pos[0], actor.pos[1]) });
     }
     items.sort((a, b) => b.d - a.d);
+
+    // ---- 그림자: 건물이 남동쪽으로 드리운다 --------------------------------------
+    // 따로 칠한 뒤 한 번에 반투명하게 얹어서, 그림자끼리 겹쳐도 더 진해지지 않게 한다.
+    shadowCtx.clearRect(0, 0, W, H);
+    shadowCtx.fillStyle = '#000';
+    for (const it of items) {
+      if (it.kind !== 'building') continue;
+      const len = Math.min(it.h * SHADOW_RATIO, SHADOW_MAX_TILES * TILE_SIZE);
+      const xa = it.x * TILE_SIZE;
+      const ya = it.y * TILE_SIZE;
+      // 그림자는 칸을 남동쪽으로 끌어 늘인 모양. 칸 반 크기 간격으로 찍어서 이어 붙인다.
+      for (let s = TILE_SIZE / 2; s <= len + 1e-6; s += TILE_SIZE / 2) {
+        const left = Math.round(PX(xa + s));
+        const top = Math.round(PY(ya + TILE_SIZE - s));
+        shadowCtx.fillRect(left, top, Math.round(PX(xa + s + TILE_SIZE)) - left, Math.round(PY(ya - s)) - top);
+      }
+    }
+    ctx.globalAlpha = SHADOW_ALPHA;
+    ctx.drawImage(shadowCanvas, 0, 0);
+    ctx.globalAlpha = 1;
 
     const fillQuad = (pts: Pt[], style: string) => {
       ctx.beginPath();
@@ -386,11 +447,41 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       if (hw < h) ctx.fillRect(left, top, t, bottom - top);
       if (he < h) ctx.fillRect(right - t, top, t, bottom - top);
     }
+
+    // ---- 도트 해상도 그림을 정수 배율로 키워 화면에 붙인다 -----------------------
+    // 도트 좌표 (OX, OY - …)가 격자에 맞춘 카메라이고, 실제 카메라는 거기서 (fx, fy)만큼 떨어져 있다.
+    screenCtx.imageSmoothingEnabled = false;
+    screenCtx.drawImage(
+      lowCanvas,
+      Math.round(canvas.width / 2 - (OX + fx) * S),
+      Math.round(canvas.height / 2 - (OY - fy) * S),
+      W * S,
+      H * S,
+    );
+  };
+
+  /**
+   * 확대·축소가 끝나면, 칸 하나가 화면에서 16px의 정수배가 되는 줌으로 살짝 맞춘다.
+   * (줌이 애매하면 도트 1px이 화면 몇 px과 딱 맞지 않아 크기가 들쭉날쭉해진다)
+   */
+  const snapZoom = () => {
+    const zoom = map.getZoom();
+    if (zoom < GRID_MIN_ZOOM) return;
+    const tilePx = TILE_SIZE * screenScale(zoom);
+    let n = Math.max(1, Math.round(tilePx / SPRITE_PX));
+    // 칸 크기가 16n px이 되는 줌: tilePx는 2^zoom에 비례한다
+    const zoomFor = (m: number) => zoom + Math.log2((m * SPRITE_PX) / tilePx);
+    if (zoomFor(n) > map.getMaxZoom()) n -= 1;
+    if (zoomFor(n) < GRID_MIN_ZOOM) n += 1;
+    const target = zoomFor(n);
+    if (Math.abs(target - zoom) > 1e-3) map.easeTo({ zoom: target, duration: 120 });
   };
 
   resize();
   map.on('resize', resize);
   map.on('render', draw); // 지도가 다시 그려질 때마다(이동·줌 중 매 프레임) 같이 그린다
+  map.on('zoomend', snapZoom);
+  snapZoom();
   map.triggerRepaint();
 
   return {
@@ -409,6 +500,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     destroy() {
       map.off('resize', resize);
       map.off('render', draw);
+      map.off('zoomend', snapZoom);
       canvas.remove();
     },
   };
