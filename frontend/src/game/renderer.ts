@@ -5,6 +5,7 @@ import { TileClass } from '../map/tileClass';
 import type { TileStore } from '../map/tileStore';
 import type { CharacterState } from './character';
 import { createSprites, SPRITE_PX, variantOf, type BuildingSprites } from './sprites';
+import { hash, isSidewalk, objectAt } from './placement';
 import { connects, loadTileset, type Tileset } from './tileset';
 
 const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6378137;
@@ -123,14 +124,23 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       const groundCls = cls === TileClass.Building ? TileClass.Ground : cls;
       return sprites.tiles[groundCls][variantOf(x, y)];
     }
-    if (cls === TileClass.Green) return tileset.grass[variantOf(x, y)];
-    const n = connects(cls, store.get(x, y + 1));
-    const e = connects(cls, store.get(x + 1, y));
-    const s = connects(cls, store.get(x, y - 1));
-    const w = connects(cls, store.get(x - 1, y));
-    if (cls === TileClass.Water) return tileset.water(n, e, s, w);
-    if (cls === TileClass.Road) return tileset.road(n, e, s, w);
-    return tileset.dirt(n, e, s, w); // 땅, 건물 바닥
+    if (cls === TileClass.Road) {
+      if (!isSidewalk(store, x, y)) return tileset.asphalt[hash(x, y) % tileset.asphalt.length];
+      // 보도: 보도끼리만 이어서, 차도 쪽과 바깥쪽에 연석 테두리가 생기게 한다
+      const sw = (dx: number, dy: number) => {
+        const c = store.get(x + dx, y + dy);
+        return c === undefined || isSidewalk(store, x + dx, y + dy);
+      };
+      return tileset.sidewalk(sw(0, 1), sw(1, 0), sw(0, -1), sw(-1, 0));
+    }
+    if (cls === TileClass.Green || cls === TileClass.Water) {
+      const n = connects(cls, store.get(x, y + 1));
+      const e = connects(cls, store.get(x + 1, y));
+      const s = connects(cls, store.get(x, y - 1));
+      const w = connects(cls, store.get(x - 1, y));
+      return cls === TileClass.Green ? tileset.grass(n, e, s, w) : tileset.water(n, e, s, w);
+    }
+    return tileset.paving[0]; // 그 밖의 땅, 건물 바닥: 보도블록
   };
 
   // 청크 바닥 그림 캐시: 칸마다 매 프레임 그리지 않고, 청크당 한 장을 미리 그려 두고 붙인다.
@@ -292,9 +302,19 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     const dist2 = (mx: number, my: number) => (mx - eyeX) ** 2 + (my - eyeY) ** 2;
     type Item = { kind: 'building'; x: number; y: number; h: number; color: number; d: number };
     type ActorItem = { kind: 'actor'; d: number };
-    const items: (Item | ActorItem)[] = [];
+    type ObjectItem = { kind: 'object'; x: number; y: number; img: HTMLCanvasElement; d: number };
+    const items: (Item | ActorItem | ObjectItem)[] = [];
     for (let y = y0 - southMargin; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
+        // 가로등·나무·벤치 (타일셋을 불러온 뒤에만)
+        if (tileset) {
+          const obj = objectAt(store, x, y);
+          if (obj) {
+            const imgs = tileset.objects[obj];
+            const img = imgs[hash(x, y) % imgs.length];
+            items.push({ kind: 'object', x, y, img, d: dist2((x + 0.5) * TILE_SIZE, (y + 0.5) * TILE_SIZE) });
+          }
+        }
         const h = heightAt(x, y);
         if (h === 0) continue;
         // 비슷한 색은 같은 그림을 쓰도록 색을 16단계로 묶는다 (그림 캐시가 너무 커지지 않게)
@@ -413,6 +433,19 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
         drawActor();
         continue;
       }
+      if (item.kind === 'object') {
+        // 물체는 칸의 남쪽 가장자리에 발을 딛고 서 있는 그림 (16×32 등)
+        const cx = Math.round(PX((item.x + 0.5) * TILE_SIZE));
+        const bottom = Math.round(PY(item.y * TILE_SIZE));
+        const w = Math.round(item.img.width * (tilePx / SPRITE_PX));
+        const h = Math.round(item.img.height * (tilePx / SPRITE_PX));
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.beginPath();
+        ctx.ellipse(cx, bottom - tilePx * 0.12, tilePx * 0.3, tilePx * 0.1, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.drawImage(item.img, cx - Math.round(w / 2), bottom - h, w, h);
+        continue;
+      }
       const { x, y, h, color } = item;
       const bs = sprites.building(color);
       const xa = x * TILE_SIZE;
@@ -474,7 +507,8 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     if (zoomFor(n) > map.getMaxZoom()) n -= 1;
     if (zoomFor(n) < GRID_MIN_ZOOM) n += 1;
     const target = zoomFor(n);
-    if (Math.abs(target - zoom) > 1e-3) map.easeTo({ zoom: target, duration: 120 });
+    // 애니메이션(easeTo)을 쓰면 그동안 캐릭터가 카메라를 옮겨도 원래 중심으로 되돌아가서, 즉시 맞춘다.
+    if (Math.abs(target - zoom) > 1e-3) map.jumpTo({ zoom: target });
   };
 
   resize();

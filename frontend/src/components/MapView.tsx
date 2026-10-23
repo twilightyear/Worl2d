@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { createCharacter, type Character, type Direction } from '../game/character';
+import { blocks, objectAt } from '../game/placement';
 import { createTileRenderer, type TileRenderer } from '../game/renderer';
 import { createBasemapToggle } from '../map/basemap';
 import { tileAt, type TileId } from '../map/grid';
@@ -91,7 +92,9 @@ export default function MapView() {
         // 아직 계산하지 않은 칸(undefined)은 지나갈 수 있게 둔다. 막으면 데이터가 늦을 때 캐릭터가 멈춘다.
         canEnter: (t) => {
           const cls = store.get(t.x, t.y);
-          return cls === undefined || isWalkable(cls);
+          if (cls === undefined) return true;
+          // 건물·물, 그리고 가로등·나무·벤치가 놓인 칸은 지나갈 수 없다
+          return isWalkable(cls) && !blocks(objectAt(store, t.x, t.y));
         },
         onChange: (tile, facing) => {
           const cls = store.get(tile.x, tile.y);

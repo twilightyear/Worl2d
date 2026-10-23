@@ -1,21 +1,25 @@
 import { TileClass } from '../map/tileClass';
+import type { ObjectKind } from './placement';
 
 /**
- * Ninja Adventure 타일셋(CC0)에서 바닥 타일과 캐릭터 그림을 불러온다.
- * 파일은 frontend/public/tiles/ninja-adventure/ 에 있다.
+ * 타일 그림 불러오기
+ * - 바닥·물체: Kenney RPG Urban Pack (CC0) — frontend/public/tiles/kenney-rpg-urban/
+ * - 캐릭터: Ninja Adventure (CC0) — frontend/public/tiles/ninja-adventure/
  */
 
-const BASE = '/tiles/ninja-adventure';
 const T = 16; // 타일 한 장 크기(px)
 
 /** 이웃 4칸(북·동·남·서)이 같은 종류인지에 따라 고르는 오토타일 16장 */
 export type Autotile = (n: boolean, e: boolean, s: boolean, w: boolean) => HTMLCanvasElement;
 
 export type Tileset = {
-  grass: HTMLCanvasElement[];
-  dirt: Autotile;
-  road: Autotile;
+  grass: Autotile;
+  sidewalk: Autotile;
   water: Autotile;
+  asphalt: HTMLCanvasElement[];
+  paving: HTMLCanvasElement[];
+  /** 물체 그림 (16×32: 아래쪽이 칸에 닿는다). 같은 종류에 변형이 여러 개일 수 있다. */
+  objects: Record<ObjectKind, HTMLCanvasElement[]>;
   /** 캐릭터 시트 (16×16 칸, 열 = 방향, 0~3행 = 걷기) */
   character: HTMLImageElement;
 };
@@ -29,103 +33,78 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-/** 시트에서 (col, row) 칸 한 장을 잘라 캔버스로 만든다. recolor로 픽셀 색을 바꿀 수 있다. */
-function cut(
-  img: HTMLImageElement,
-  col: number,
-  row: number,
-  recolor?: (r: number, g: number, b: number) => [number, number, number] | null,
-): HTMLCanvasElement {
+/** 시트에서 (col, row)부터 w×h칸을 잘라 캔버스로 만든다 */
+function cut(img: HTMLImageElement, col: number, row: number, w = 1, h = 1): HTMLCanvasElement {
   const c = document.createElement('canvas');
-  c.width = T;
-  c.height = T;
-  const ctx = c.getContext('2d', { willReadFrequently: Boolean(recolor) });
+  c.width = w * T;
+  c.height = h * T;
+  const ctx = c.getContext('2d');
   if (!ctx) throw new Error('canvas 2d context를 만들 수 없습니다');
-  ctx.drawImage(img, col * T, row * T, T, T, 0, 0, T, T);
-  if (recolor) {
-    const data = ctx.getImageData(0, 0, T, T);
-    const d = data.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const out = recolor(d[i], d[i + 1], d[i + 2]);
-      if (out) [d[i], d[i + 1], d[i + 2]] = out;
-    }
-    ctx.putImageData(data, 0, 0);
-  }
+  ctx.drawImage(img, col * T, row * T, w * T, h * T, 0, 0, w * T, h * T);
   return c;
 }
 
 /**
- * 오토타일 묶음 (이 타일셋의 배치):
- *   (0,0)(1,0)(2,0) | (3,0)   ← 3×3 덩어리의 윗줄 | 세로 길 위쪽 끝
- *   (0,1)(1,1)(2,1) | (3,1)   ← 가운데 줄         | 세로 길 중간
- *   (0,2)(1,2)(2,2) | (3,2)   ← 아랫줄            | 세로 길 아래쪽 끝
- *   (0,3)(1,3)(2,3) | (3,3)   ← 가로 길 왼쪽 끝·중간·오른쪽 끝 | 외딴 한 칸
- * (originCol, originRow)는 묶음의 왼쪽 위 칸이다.
+ * Kenney 오토타일 배치 ((oc, or) = 3×3 덩어리의 왼쪽 위 칸):
+ *   3×3 덩어리: (oc..oc+2, or..or+2)  ← 모서리·변·가운데
+ *   가로 띠:    (oc+3, or+2) 왼쪽 끝, (oc+4, or+2) 중간, (oc+5, or+2) 오른쪽 끝
+ *   외딴 한 칸: (oc+6, or+2)
+ *   세로 띠:    (oc+7, or) 위쪽 끝, (oc+7, or+1) 중간, (oc+7, or+2) 아래쪽 끝
  */
-function autotile(
-  img: HTMLImageElement,
-  originCol: number,
-  originRow: number,
-  recolor?: (r: number, g: number, b: number) => [number, number, number] | null,
-): Autotile {
+function autotile(img: HTMLImageElement, oc: number, or: number): Autotile {
   const cache = new Map<string, HTMLCanvasElement>();
-  const at = (dc: number, dr: number) => {
-    const k = `${dc},${dr}`;
-    let c = cache.get(k);
-    if (!c) {
-      c = cut(img, originCol + dc, originRow + dr, recolor);
-      cache.set(k, c);
+  const at = (c: number, r: number) => {
+    const k = `${c},${r}`;
+    let t = cache.get(k);
+    if (!t) {
+      t = cut(img, c, r);
+      cache.set(k, t);
     }
-    return c;
+    return t;
   };
   return (n, e, s, w) => {
-    if (n && e && s && w) return at(1, 1);
-    if (!n && e && s && w) return at(1, 0);
-    if (n && e && !s && w) return at(1, 2);
-    if (n && e && s && !w) return at(0, 1);
-    if (n && !e && s && w) return at(2, 1);
-    if (!n && !w && e && s) return at(0, 0);
-    if (!n && !e && w && s) return at(2, 0);
-    if (!s && !w && n && e) return at(0, 2);
-    if (!s && !e && n && w) return at(2, 2);
-    if (n && s) return at(3, 1); // 세로로만 이어짐
-    if (s) return at(3, 0); // 남쪽으로만 이어짐 → 세로 길 위쪽 끝
-    if (n) return at(3, 2); // 북쪽으로만 이어짐 → 세로 길 아래쪽 끝
-    if (e && w) return at(1, 3); // 가로로만 이어짐
-    if (e) return at(0, 3); // 동쪽으로만 → 가로 길 왼쪽 끝
-    if (w) return at(2, 3); // 서쪽으로만 → 가로 길 오른쪽 끝
-    return at(3, 3); // 외딴 한 칸
+    if (n && e && s && w) return at(oc + 1, or + 1);
+    if (!n && e && s && w) return at(oc + 1, or);
+    if (n && e && !s && w) return at(oc + 1, or + 2);
+    if (n && e && s && !w) return at(oc, or + 1);
+    if (n && !e && s && w) return at(oc + 2, or + 1);
+    if (!n && !w && e && s) return at(oc, or);
+    if (!n && !e && w && s) return at(oc + 2, or);
+    if (!s && !w && n && e) return at(oc, or + 2);
+    if (!s && !e && n && w) return at(oc + 2, or + 2);
+    if (n && s) return at(oc + 7, or + 1); // 세로로만 이어짐
+    if (s) return at(oc + 7, or); // 남쪽으로만 → 세로 띠 위쪽 끝
+    if (n) return at(oc + 7, or + 2); // 북쪽으로만 → 세로 띠 아래쪽 끝
+    if (e && w) return at(oc + 4, or + 2); // 가로로만 이어짐
+    if (e) return at(oc + 3, or + 2); // 동쪽으로만 → 가로 띠 왼쪽 끝
+    if (w) return at(oc + 5, or + 2); // 서쪽으로만 → 가로 띠 오른쪽 끝
+    return at(oc + 6, or + 2); // 외딴 한 칸
   };
 }
 
-/** 흙(갈색) 픽셀만 회색 포장도로 색으로 바꾼다. 풀(초록, g ≥ r)은 그대로 둔다. */
-const dirtToPavement = (r: number, g: number, b: number): [number, number, number] | null => {
-  if (r <= g + 8) return null;
-  const v = 0.3 * r + 0.59 * g + 0.11 * b;
-  const clamp = (x: number) => Math.max(0, Math.min(255, Math.round(x)));
-  return [clamp(v * 0.95 + 18), clamp(v * 0.97 + 20), clamp(v + 28)];
-};
-
 export async function loadTileset(): Promise<Tileset> {
-  const [floor, water, character] = await Promise.all([
-    loadImage(`${BASE}/TilesetFloor.png`),
-    loadImage(`${BASE}/TilesetWater.png`),
-    loadImage(`${BASE}/CharacterBoy.png`),
+  const [urban, character] = await Promise.all([
+    loadImage('/tiles/kenney-rpg-urban/urban.png'),
+    loadImage('/tiles/ninja-adventure/CharacterBoy.png'),
   ]);
   return {
-    // 연두색 풀밭: 무늬 없는 칸을 더 자주 쓴다
-    grass: [cut(floor, 0, 12), cut(floor, 0, 12), cut(floor, 1, 12), cut(floor, 3, 12)],
-    dirt: autotile(floor, 0, 7),
-    road: autotile(floor, 0, 7, dirtToPavement),
-    water: autotile(water, 0, 6),
+    grass: autotile(urban, 0, 0),
+    sidewalk: autotile(urban, 8, 0),
+    water: autotile(urban, 8, 6),
+    asphalt: [cut(urban, 9, 16), cut(urban, 9, 17), cut(urban, 1, 17), cut(urban, 8, 16)],
+    paving: [cut(urban, 1, 4)],
+    objects: {
+      lamp: [cut(urban, 7, 6, 1, 2)],
+      streetTree: [cut(urban, 17, 8, 1, 2)],
+      tree: [cut(urban, 16, 8, 1, 2), cut(urban, 17, 8, 1, 2), cut(urban, 21, 8, 1, 2)],
+      bench: [cut(urban, 1, 10)],
+    },
     character,
   };
 }
 
-/** 칸 종류별로, 이웃이 '이어진 것'으로 볼 종류 (오토타일 테두리를 그리지 않을 이웃) */
+/** 오토타일에서 이웃을 '이어진 것'으로 볼지 (테두리를 그리지 않을 이웃) */
 export function connects(cls: TileClass, neighbor: TileClass | undefined): boolean {
   if (neighbor === undefined) return true; // 아직 계산 전인 칸에는 테두리를 그리지 않는다
-  if (cls === TileClass.Water) return neighbor === TileClass.Water;
-  // 흙·도로·건물 바닥은 풀밭이 아닌 것과는 모두 이어진다 (흙과 도로 사이에 풀 테두리가 생기지 않게)
-  return neighbor !== TileClass.Green;
+  return neighbor === cls;
 }
