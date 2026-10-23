@@ -1,2 +1,93 @@
-# Worl2d
-Spring Boot 활용 토이 프로젝트
+# Worl2D
+
+실제 지도 위를 포켓몬 DS처럼 한 칸씩 걸어 다니는 2D 도트 게임입니다.
+OpenStreetMap 데이터를 2m 격자로 바꾼 뒤 도로·보도·공원·물·건물을 도트 타일로 그리고, 캐릭터는 그 격자 위를 이동합니다.
+
+## 주요 기능
+
+- **실제 지도 → 2m 격자**: OpenFreeMap 벡터 타일을 64×64칸 청크 단위로 계산해 칸마다 땅·풀·물·도로·건물 중 하나로 분류
+- **도트 렌더러**: 칸당 16px, 정수 배율로 확대해 픽셀이 흐려지지 않음
+- **가짜 3D 건물**: 비스듬한 시점과 원근을 적용하고 실제 건물 높이와 색을 반영. 벽돌·창문·문·지붕 그림과 그림자 표시
+- **배치 규칙**: 보도·아스팔트 자동 구분, 가로등·가로수·공원 나무·벤치 자동 배치
+- **캐릭터 이동**: 방향키/WASD로 한 칸씩 이동. 건물·물·물체와 충돌
+
+## 기술 스택
+
+| 영역 | 사용 기술 |
+| --- | --- |
+| 프론트엔드 | React 19, TypeScript, Vite, MapLibre GL JS |
+| 백엔드 | Spring Boot 4.1, Java 17, Gradle |
+| 지도 데이터 | OpenFreeMap (OpenMapTiles 스키마, © OpenStreetMap contributors) |
+
+## 폴더 구조
+
+```
+Worl2D/
+├── frontend/                 # React + Vite
+│   ├── public/tiles/         # 게임에서 쓰는 타일셋 그림
+│   └── src/
+│       ├── components/       # MapView, ApiStatus
+│       ├── map/              # 격자 규칙, 칸 종류 계산, 청크 저장
+│       ├── game/             # 렌더러, 타일셋, 배치 규칙, 캐릭터
+│       └── api/              # 백엔드 호출
+└── backend/                  # Spring Boot
+    └── src/main/java/...     # health, CORS 설정, 샘플 GeoJSON API
+```
+
+## 실행 방법
+
+### 백엔드
+
+```bash
+cd backend
+./gradlew bootRun        # Windows: gradlew.bat bootRun
+```
+
+`http://localhost:8080`에서 실행됩니다.
+
+### 프론트엔드
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+`http://localhost:5173`에서 실행됩니다. 백엔드 없이도 게임 화면은 동작합니다. 이 경우 화면 아래에 API 연결 실패 표시만 나타납니다.
+
+### 환경 변수 (선택)
+
+`frontend/.env.local`에 넣으면 기본값 대신 사용합니다.
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `VITE_API_BASE_URL` | `http://localhost:8080` | 백엔드 주소 |
+| `VITE_MAP_STYLE_URL` | OpenFreeMap 스타일 | 지도 스타일 주소 |
+
+## 조작법
+
+| 키 | 동작 |
+| --- | --- |
+| 방향키 / WASD | 한 칸 이동 |
+| M | 게임 화면 ↔ 일반 지도 전환 |
+| 마우스 휠, +/− 버튼 | 확대·축소 |
+
+## API
+
+| 메서드 | 경로 | 설명 |
+| --- | --- | --- |
+| GET | `/api/health` | 서버 상태 확인 |
+| GET | `/api/features/sample` | 샘플 GeoJSON FeatureCollection |
+
+## 그림 출처
+
+모두 CC0(퍼블릭 도메인)이라 상업적으로도 사용할 수 있습니다.
+
+- [Kenney – RPG Urban Pack](https://kenney.nl/assets/rpg-urban-pack): 바닥, 보도, 물, 가로등, 나무, 벤치, 건물 벽·창문·문·지붕
+- [Ninja Adventure Asset Pack](https://pixel-boy.itch.io/ninja-adventure-asset-pack) (Pixel-boy, AAA): 캐릭터
+
+각 팩의 라이선스 파일은 `frontend/public/tiles/` 아래에 있습니다.
+
+## 라이선스
+
+[MIT](LICENSE)
