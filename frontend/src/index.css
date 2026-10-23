@@ -22,6 +22,7 @@ body,
   font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #1a1a1a;
   pointer-events: none; /* 패널 위를 클릭해도 지도가 클릭되도록 */
+  z-index: 3; /* 실내 화면보다 위 */
 }
 
 .api-status {
@@ -62,4 +63,12 @@ body,
   left: 0;
   top: 0;
   pointer-events: none;
+}
+
+/* 건물 실내 화면: 게임 화면을 덮는다 (패널은 그 위에 보인다) */
+.interior-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
 }
