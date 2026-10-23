@@ -3,6 +3,8 @@ import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { createCharacter, type Character, type Direction } from '../game/character';
 import { resolveZ, stepLevel } from '../game/levels';
+import { createInterior, isDoorCell, type Interior } from '../game/interior';
+import { loadTileset, type Tileset } from '../game/tileset';
 import { createTileRenderer, type TileRenderer } from '../game/renderer';
 import { createBasemapToggle } from '../map/basemap';
 import { tileAt, type TileId } from '../map/grid';
@@ -69,6 +71,8 @@ export default function MapView() {
     let tilesVisible = true;
     let renderer: TileRenderer | undefined;
     let store: TileStore | undefined;
+    let interior: Interior | undefined;
+    let tilesetP: Promise<Tileset> | undefined;
 
     let setBasemapVisible: ((visible: boolean) => void) | undefined;
 
@@ -96,7 +100,30 @@ export default function MapView() {
       character = createCharacter(map, {
         start: START_TILE,
         // 건물·물·물체는 막히고, 다리는 끝에서 다리 방향으로만 오르내린다 (game/levels.ts)
-        enter: (from, to, z) => stepLevel(s, from, to, z),
+        enter: (from, to, z) => {
+          // 문이 있는 건물 칸으로 걸어 들어가면 실내 화면으로 바뀐다
+          if (z === 0 && !interior && isDoorCell(s, to.x, to.y)) {
+            const ch = character!;
+            ch.setPaused(true);
+            interior = createInterior({
+              store: s,
+              door: to,
+              outside: from,
+              container: map.getContainer(),
+              tileset: () => (tilesetP ??= loadTileset()),
+              onChange: (f, n) => setPlayer((p) => p && { ...p, ground: `실내 ${f + 1}층 / ${n}층` }),
+              onExit: (out) => {
+                interior = undefined;
+                ch.setPaused(false);
+                // 건물 반대쪽(문 → 바깥 방향)을 바라보게 한다
+                const face = out.x > to.x ? 'right' : out.x < to.x ? 'left' : out.y > to.y ? 'up' : 'down';
+                ch.teleport(out, face);
+              },
+            });
+            return null;
+          }
+          return stepLevel(s, from, to, z);
+        },
         onChange: (tile, facing, z) => {
           const cls = s.get(tile.x, tile.y);
           const elev = s.elevation(tile.x, tile.y);
@@ -125,12 +152,14 @@ export default function MapView() {
       setClicked({ lng, lat, tile });
       // 클릭한 칸으로 캐릭터 순간이동. 건물·물 칸은 막는다 (다리가 놓인 물은 상판 위로 간다)
       const cls = store?.get(tile.x, tile.y);
+      if (interior) return; // 실내에서는 순간이동하지 않는다
       if (cls === undefined || isWalkable(cls) || store?.bridge(tile.x, tile.y)) character?.teleport(tile);
     });
 
     // 컴포넌트가 사라질 때 캐릭터(키보드 이벤트, 애니메이션)와 지도 리소스를 해제한다.
     return () => {
       window.removeEventListener('keydown', onKeyDown);
+      interior?.destroy();
       character?.destroy();
       renderer?.destroy();
       map.remove();

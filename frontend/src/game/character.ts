@@ -54,7 +54,9 @@ export type CharacterOptions = {
 export type Character = {
   getState(): CharacterState;
   /** 그 칸으로 바로 옮긴다 (땅 층으로. 다리 위 판단은 levels.resolveZ가 한다) */
-  teleport(tile: TileId): void;
+  teleport(tile: TileId, face?: Direction): void;
+  /** true면 키 입력을 받지 않는다 (건물 실내에 있는 동안) */
+  setPaused(paused: boolean): void;
   destroy(): void;
 };
 
@@ -77,6 +79,7 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): Ch
   const held: Direction[] = []; // 누르고 있는 방향들. 마지막에 누른 방향이 우선
   // 마지막으로 누른 방향. 키를 아주 짧게 눌렀다 떼서 held에 남아 있지 않아도 한 칸은 이동하게 한다.
   let queued: Direction | null = null;
+  let paused = false;
 
   // 캐릭터 위치를 바꾸고 카메라를 그 위치로 옮긴다. (카메라 이동이 다시 그리기를 일으킨다)
   const place = (p: Mercator) => {
@@ -86,7 +89,7 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): Ch
 
   const onKeyDown = (e: KeyboardEvent) => {
     const dir = KEY_TO_DIRECTION[e.code];
-    if (!dir) return;
+    if (!dir || paused) return;
     e.preventDefault(); // 방향키로 페이지가 스크롤되지 않게
     if (!held.includes(dir)) held.push(dir);
     if (!e.repeat) queued = dir;
@@ -123,7 +126,7 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): Ch
 
     // 2. 멈춰 있고 방향키가 눌려 있으면 다음 칸으로 출발한다.
     const next = held.length > 0 ? held[held.length - 1] : queued;
-    if (!step && next) {
+    if (!step && next && !paused) {
       const dir = next;
       queued = null;
       if (dir !== facing) {
@@ -159,7 +162,13 @@ export function createCharacter(map: MapLibreMap, options: CharacterOptions): Ch
       z,
       next: step ? { tile: step.target, z: step.z, t: Math.min(1, (performance.now() - step.startedAt) / STEP_MS) } : null,
     }),
-    teleport(target) {
+    setPaused(p) {
+      paused = p;
+      held.length = 0;
+      queued = null;
+    },
+    teleport(target, face) {
+      if (face) facing = face;
       step = null;
       queued = null;
       tile = { ...target };
