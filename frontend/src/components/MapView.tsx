@@ -2,14 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { createCharacter, type Character, type Direction } from '../game/character';
-import { blocks, objectAt } from '../game/placement';
+import { resolveZ, stepLevel } from '../game/levels';
 import { createTileRenderer, type TileRenderer } from '../game/renderer';
 import { createBasemapToggle } from '../map/basemap';
 import { tileAt, type TileId } from '../map/grid';
 import { addGridLayer, GRID_MIN_ZOOM, showSelectedTile } from '../map/gridLayer';
 import { addSampleLayer } from '../map/sampleLayer';
 import { isWalkable, TILE_CLASS_LABEL } from '../map/tileClass';
-import { createTileStore } from '../map/tileStore';
+import { createTileStore, type TileStore } from '../map/tileStore';
 
 // 환경변수가 없을 때 쓰는 기본값 (OpenFreeMap, 무료·키 없음)
 const DEFAULT_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
@@ -19,8 +19,12 @@ const INITIAL_CENTER: [number, number] = [126.978, 37.5665];
 // 게임 화면 기준 줌. 줌 21에서 칸 하나가 화면에서 약 67px
 const INITIAL_ZOOM = 21;
 
-// 캐릭터 시작 칸: 서울광장 잔디 (서울시청 좌표는 건물 안이라 갇힐 수 있다)
-const START_TILE = tileAt(126.97795, 37.5658);
+// 캐릭터 시작 칸: 주소 뒤에 ?at=경도,위도 를 붙이면 그 위치, 없으면 서울광장 잔디
+// (서울시청 좌표는 건물 안이라 갇힐 수 있다)
+const START_TILE = (() => {
+  const [lng, lat] = (new URLSearchParams(window.location.search).get('at') ?? '').split(',').map(Number);
+  return Number.isFinite(lng) && Number.isFinite(lat) && lng !== 0 ? tileAt(lng, lat) : tileAt(126.97795, 37.5658);
+})();
 
 const DIRECTION_LABEL: Record<Direction, string> = { up: '↑', down: '↓', left: '←', right: '→' };
 
@@ -64,6 +68,7 @@ export default function MapView() {
     let character: Character | undefined;
     let tilesVisible = true;
     let renderer: TileRenderer | undefined;
+    let store: TileStore | undefined;
 
     let setBasemapVisible: ((visible: boolean) => void) | undefined;
 
@@ -85,20 +90,17 @@ export default function MapView() {
       map.on('zoom', syncBasemap);
       addSampleLayer(map);
       addGridLayer(map);
-      const store = createTileStore(map, () => map.triggerRepaint());
-      renderer = createTileRenderer(map, store);
+      const s = createTileStore(map, () => map.triggerRepaint());
+      store = s;
+      renderer = createTileRenderer(map, s);
       character = createCharacter(map, {
         start: START_TILE,
-        // 아직 계산하지 않은 칸(undefined)은 지나갈 수 있게 둔다. 막으면 데이터가 늦을 때 캐릭터가 멈춘다.
-        canEnter: (t) => {
-          const cls = store.get(t.x, t.y);
-          if (cls === undefined) return true;
-          // 건물·물, 그리고 가로등·나무·벤치가 놓인 칸은 지나갈 수 없다
-          return isWalkable(cls) && !blocks(objectAt(store, t.x, t.y));
-        },
-        onChange: (tile, facing) => {
-          const cls = store.get(tile.x, tile.y);
-          setPlayer({ tile, facing, ground: cls === undefined ? '?' : TILE_CLASS_LABEL[cls] });
+        // 건물·물·물체는 막히고, 다리는 끝에서 다리 방향으로만 오르내린다 (game/levels.ts)
+        enter: (from, to, z) => stepLevel(s, from, to, z),
+        onChange: (tile, facing, z) => {
+          const cls = s.get(tile.x, tile.y);
+          const ground = resolveZ(s, tile.x, tile.y, z) >= 1 ? '다리 위' : cls === undefined ? '?' : TILE_CLASS_LABEL[cls];
+          setPlayer({ tile, facing, ground });
         },
       });
       // 캐릭터는 렌더러가 건물과 앞뒤 순서를 맞춰 그린다 (건물 뒤에 서면 가려진다)
@@ -119,6 +121,9 @@ export default function MapView() {
       showSelectedTile(map, tile);
       renderer?.setSelected(tile);
       setClicked({ lng, lat, tile });
+      // 클릭한 칸으로 캐릭터 순간이동. 건물·물 칸은 막는다 (다리가 놓인 물은 상판 위로 간다)
+      const cls = store?.get(tile.x, tile.y);
+      if (cls === undefined || isWalkable(cls) || store?.bridge(tile.x, tile.y)) character?.teleport(tile);
     });
 
     // 컴포넌트가 사라질 때 캐릭터(키보드 이벤트, 애니메이션)와 지도 리소스를 해제한다.

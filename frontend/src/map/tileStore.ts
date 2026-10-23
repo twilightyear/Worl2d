@@ -13,6 +13,8 @@ export type TileStore = {
   height(x: number, y: number): number;
   /** 건물 벽 색 0xRRGGBB. 건물이 아니거나 계산 전이면 0 */
   color(x: number, y: number): number;
+  /** 다리 상판 방향(BridgeDir). 다리가 없거나 계산 전이면 0 */
+  bridge(x: number, y: number): number;
   /** 청크 데이터 (계산 전이면 undefined) */
   chunk(cx: number, cy: number): ChunkData | undefined;
   /** 새 청크가 계산될 때마다 1씩 커진다 (그림 캐시를 다시 만들지 판단할 때 쓴다) */
@@ -166,6 +168,10 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
     color(x, y) {
       const found = locate(x, y);
       return found ? found[0].colors[found[1]] : 0;
+    },
+    bridge(x, y) {
+      const found = locate(x, y);
+      return found ? found[0].bridges[found[1]] : 0;
     },
     chunk(cx, cy) {
       return chunks.get(key(cx, cy));

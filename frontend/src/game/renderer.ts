@@ -6,6 +6,7 @@ import type { TileStore } from '../map/tileStore';
 import type { CharacterState } from './character';
 import { createSprites, roofColorOf, SPRITE_PX, variantOf } from './sprites';
 import { hash, isSidewalk, objectAt } from './placement';
+import { DECK_M, deckHeightM, resolveZ, surfaceM } from './levels';
 import { connects, loadTileset, tint, type Tileset } from './tileset';
 
 const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6378137;
@@ -37,6 +38,11 @@ const SHADOW_RATIO = 0.6;
 const SHADOW_MAX_TILES = 4;
 /** 그림자 진하기 */
 const SHADOW_ALPHA = 0.22;
+
+// ---- 다리 -------------------------------------------------------------------
+/** 다리 상판 두께(실제 m). 옆면은 이 두께만 그려서 다리 아래가 보이게 한다 */
+const DECK_SLAB_M = 1.2;
+const DECK_WALL = 0x9a9a9a;
 
 // ---- 바닥 캐시 ----------------------------------------------------------------
 /** 청크 바닥 그림을 몇 장까지 보관할지 (한 장 = 1024×1024px ≈ 4MB) */
@@ -113,6 +119,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     .then((t) => {
       tileset = t;
       groundCache.clear(); // 새 그림으로 바닥을 다시 그리게
+      facadeCache.clear();
       map.triggerRepaint();
     })
     .catch((err) => console.error(err));
@@ -147,6 +154,22 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       return c;
     });
   const facadeRoof = (t: Tileset, color: number) => cached(`r${color}`, () => tint(t.facade.concrete, roofColorOf(color)));
+  /** 다리 옆면(콘크리트 거더) */
+  const deckWall = () =>
+    cached('deck', () => {
+      let c: HTMLCanvasElement;
+      if (tileset) c = tint(tileset.facade.concrete, DECK_WALL);
+      else {
+        c = newCanvas(SPRITE_PX, SPRITE_PX).c;
+        const g0 = c.getContext('2d')!;
+        g0.fillStyle = shadeHex(DECK_WALL, 1);
+        g0.fillRect(0, 0, SPRITE_PX, SPRITE_PX);
+      }
+      const g = c.getContext('2d')!;
+      g.fillStyle = shadeHex(DECK_WALL, 0.6);
+      g.fillRect(0, SPRITE_PX - 2, SPRITE_PX, 2);
+      return c;
+    });
 
   /** 바닥 칸 그림. 타일셋이 있으면 이웃을 보고 오토타일을 고른다. */
   const groundTile = (x: number, y: number, cls: TileClass): HTMLCanvasElement => {
@@ -295,6 +318,8 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       const shown = real <= HEIGHT_KEEP_M ? real : HEIGHT_KEEP_M + (real - HEIGHT_KEEP_M) * HEIGHT_SCALE;
       return Math.min(shown, MAX_RENDER_M) / realPerMerc;
     };
+    // 다리 상판 높이(메르카토르 m). 다리가 아니면 0
+    const deckH = (x: number, y: number) => deckHeightM(store, x, y) / realPerMerc;
 
     // 화면에 보이는 칸 범위 (건물은 화면 바깥쪽으로만 기울므로 바닥 범위만 보면 된다)
     const halfW = W / 2 / k;
@@ -334,7 +359,8 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     type Item = { kind: 'building'; x: number; y: number; h: number; color: number; d: number };
     type ActorItem = { kind: 'actor'; d: number };
     type ObjectItem = { kind: 'object'; x: number; y: number; img: HTMLCanvasElement; d: number };
-    const items: (Item | ActorItem | ObjectItem)[] = [];
+    type DeckItem = { kind: 'deck'; x: number; y: number; h: number; dir: number; d: number };
+    const items: (Item | ActorItem | ObjectItem | DeckItem)[] = [];
     for (let y = y0 - southMargin; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         // 가로등·나무·벤치 (타일셋을 불러온 뒤에만)
@@ -346,6 +372,9 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
             items.push({ kind: 'object', x, y, img, d: dist2((x + 0.5) * TILE_SIZE, (y + 0.5) * TILE_SIZE) });
           }
         }
+        // 다리 상판 (같은 칸의 물체보다 나중에 넣어서, 거리가 같으면 상판이 위에 그려지게)
+        const dir = store.bridge(x, y);
+        if (dir) items.push({ kind: 'deck', x, y, h: deckH(x, y), dir, d: dist2((x + 0.5) * TILE_SIZE, (y + 0.5) * TILE_SIZE) });
         const h = heightAt(x, y);
         if (h === 0) continue;
         // 비슷한 색은 같은 그림을 쓰도록 색을 16단계로 묶는다 (그림 캐시가 너무 커지지 않게)
@@ -354,8 +383,22 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       }
     }
     const actor = getActor?.();
+    // 캐릭터가 서 있는 높이(메르카토르 m): 출발 칸과 도착 칸의 바닥 높이 사이
+    let actorH = 0;
+    let actorHidden = false; // 다리 아래에 있어서 상판에 가려지는지
     if (actor) {
-      items.push({ kind: 'actor', d: dist2(actor.pos[0], actor.pos[1]) });
+      const h0 = surfaceM(store, actor.tile.x, actor.tile.y, actor.z);
+      const h1 = actor.next ? surfaceM(store, actor.next.tile.x, actor.next.tile.y, actor.next.z) : h0;
+      actorH = (h0 + (h1 - h0) * (actor.next?.t ?? 0)) / realPerMerc;
+      // 앞뒤 순서: 다리 위면 지나는 두 칸의 상판보다 나중에, 다리 아래면 두 칸의 상판보다 먼저 그린다
+      const cells = [actor.tile, actor.next?.tile ?? actor.tile];
+      const ds = cells.map((t) => dist2((t.x + 0.5) * TILE_SIZE, (t.y + 0.5) * TILE_SIZE));
+      const zNow = resolveZ(store, actor.tile.x, actor.tile.y, actor.z);
+      const onDeck = Math.max(zNow, actor.next?.z ?? 0) >= 1;
+      const underDeck = !onDeck && cells.some((t) => store.bridge(t.x, t.y));
+      actorHidden = underDeck;
+      const d = onDeck ? Math.min(...ds) - 1e-3 : underDeck ? Math.max(...ds) + 1e-3 : dist2(actor.pos[0], actor.pos[1]);
+      items.push({ kind: 'actor', d });
     }
     items.sort((a, b) => b.d - a.d);
 
@@ -364,7 +407,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     shadowCtx.clearRect(0, 0, W, H);
     shadowCtx.fillStyle = '#000';
     for (const it of items) {
-      if (it.kind !== 'building') continue;
+      if (it.kind !== 'building' && it.kind !== 'deck') continue;
       const len = Math.min(it.h * SHADOW_RATIO, SHADOW_MAX_TILES * TILE_SIZE);
       const xa = it.x * TILE_SIZE;
       const ya = it.y * TILE_SIZE;
@@ -428,8 +471,8 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
     const tilePx = TILE_SIZE * k;
     const drawActor = () => {
       if (!actor) return;
-      const fx = PX(actor.pos[0]);
-      const fy = PY(actor.pos[1]);
+      const fx = PX(actor.pos[0], actorH);
+      const fy = PY(actor.pos[1], actorH);
       ctx.fillStyle = 'rgba(0,0,0,0.25)';
       ctx.beginPath();
       ctx.ellipse(fx, fy + tilePx * 0.3, tilePx * 0.32, tilePx * 0.12, 0, 0, Math.PI * 2);
@@ -460,7 +503,57 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       ctx.fill();
     };
 
+    /** 다리 한 칸: 기둥 → 옆면(상판 두께만큼) → 상판 → 난간 */
+    const deckFull = DECK_M / realPerMerc;
+    const slab = DECK_SLAB_M / realPerMerc;
+    const drawDeck = ({ x, y, h, dir }: DeckItem) => {
+      const xa = x * TILE_SIZE;
+      const xb = (x + 1) * TILE_SIZE;
+      const ya = y * TILE_SIZE;
+      const yb = (y + 1) * TILE_SIZE;
+      const mod = (v: number, n: number) => ((v % n) + n) % n;
+      // 기둥: 다리 방향으로 8칸마다, 폭 방향으로 3칸마다
+      const [along, across] = dir === 1 ? [x, y] : [y, x];
+      if (h >= deckFull - 1e-6 && mod(along, 8) === 0 && mod(across, 3) === 1) {
+        const ym = ya + TILE_SIZE / 2;
+        const xl = xa + TILE_SIZE * 0.3;
+        const xr = xb - TILE_SIZE * 0.3;
+        fillQuad([[PX(xl), PY(ym)], [PX(xr), PY(ym)], [PX(xr, h - slab), PY(ym, h - slab)], [PX(xl, h - slab), PY(ym, h - slab)]], '#7d7d7d');
+      }
+      const wall: WallFn = () => deckWall();
+      const lo = (n: number) => Math.max(n, h - slab);
+      const hs = deckH(x, y - 1);
+      const hn = deckH(x, y + 1);
+      const hw = deckH(x - 1, y);
+      const he = deckH(x + 1, y);
+      if (hw < h && PX(xa, h) > PX(xa)) face(wall, 'west', [xa, ya], [xa, yb], lo(hw), h);
+      if (he < h && PX(xb, h) < PX(xb)) face(wall, 'east', [xb, ya], [xb, yb], lo(he), h);
+      if (hn < h && PY(yb, h) > PY(yb)) face(wall, 'north', [xa, yb], [xb, yb], lo(hn), h);
+      if (hs < h && PY(ya, h) < PY(ya)) face(wall, 'south', [xa, ya], [xb, ya], lo(hs), h);
+      // 상판(도로)
+      const left = Math.round(PX(xa, h));
+      const right = Math.round(PX(xb, h));
+      const top = Math.round(PY(yb, h));
+      const bottom = Math.round(PY(ya, h));
+      const road = tileset ? tileset.asphalt[hash(x, y) % tileset.asphalt.length] : sprites.tiles[TileClass.Road][variantOf(x, y)];
+      ctx.drawImage(road, left, top, right - left, bottom - top);
+      // 난간: 다리 옆(다리 방향과 수직인 쪽)이 다리 밖이면 밝은 선
+      const t = Math.max(1, Math.round((right - left) / SPRITE_PX));
+      ctx.fillStyle = '#e8e8e8';
+      if (dir === 1) {
+        if (!store.bridge(x, y + 1)) ctx.fillRect(left, top, right - left, t * 2);
+        if (!store.bridge(x, y - 1)) ctx.fillRect(left, bottom - t * 2, right - left, t * 2);
+      } else {
+        if (!store.bridge(x - 1, y)) ctx.fillRect(left, top, t * 2, bottom - top);
+        if (!store.bridge(x + 1, y)) ctx.fillRect(right - t * 2, top, t * 2, bottom - top);
+      }
+    };
+
     for (const item of items) {
+      if (item.kind === 'deck') {
+        drawDeck(item);
+        continue;
+      }
       if (item.kind === 'actor') {
         drawActor();
         continue;
@@ -515,6 +608,13 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       if (hs < h) ctx.fillRect(left, bottom - t, right - left, t);
       if (hw < h) ctx.fillRect(left, top, t, bottom - top);
       if (he < h) ctx.fillRect(right - t, top, t, bottom - top);
+    }
+
+    // 다리 아래에 있으면 상판 위에 캐릭터를 반투명하게 한 번 더 그려서 위치를 알 수 있게 한다
+    if (actorHidden) {
+      ctx.globalAlpha = 0.45;
+      drawActor();
+      ctx.globalAlpha = 1;
     }
 
     // ---- 도트 해상도 그림을 정수 배율로 키워 화면에 붙인다 -----------------------

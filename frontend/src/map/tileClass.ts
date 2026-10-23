@@ -74,7 +74,18 @@ export type Draw = {
   heightM?: number;
   /** 건물 벽 색 0xRRGGBB (지도 데이터에 색이 있을 때만). 없으면 건물마다 대체 색을 고른다. */
   color?: number;
+  /** 다리 위 도로. 칸 종류(아래층)에는 넣지 않고, 다리 배열(위층)에만 넣는다. */
+  bridge?: boolean;
 };
+
+/** 다리 상판 방향 (칸마다). 다리는 이 방향으로만 오르내린다. */
+export const BridgeDir = {
+  None: 0,
+  /** 동서 방향 다리 */
+  EastWest: 1,
+  /** 남북 방향 다리 */
+  NorthSouth: 2,
+} as const;
 
 /** 청크 계산 결과. 두 배열 모두 index = row * CHUNK_SIZE + col, row 0이 북쪽 줄 */
 export type ChunkData = {
@@ -83,6 +94,8 @@ export type ChunkData = {
   heights: Uint8Array;
   /** 건물 벽 색 0xRRGGBB. 건물이 아닌 칸은 0 */
   colors: Uint32Array;
+  /** 다리 상판 방향(BridgeDir). 다리가 없으면 0. 다리 아래 칸 종류는 classes에 그대로 남는다 */
+  bridges: Uint8Array;
 };
 
 /** 색 정보가 없는 건물에 쓸 건물 색 (건물마다 하나를 고정으로 고른다) */
@@ -200,11 +213,12 @@ export function collectFeatures(map: MapLibreMap, sourceId: string): Draw[] {
     if (f.properties?.brunnel === 'tunnel') continue; // 땅속 수로(복개천)는 제외
     draws.push({ cls: TileClass.Water, geometry: f.geometry, bbox: NO_BBOX, widthM: WATERWAY_WIDTH_M });
   }
-  // 3) 도로 (지하 도로는 제외)
+  // 3) 도로 (지하 도로는 제외). 다리 위 도로는 따로 표시해서 다리 아래 칸(물, 아래 도로)이 남게 한다.
   for (const f of q('transportation')) {
     const width = ROAD_WIDTH_M[cls(f)];
     if (!width || f.properties?.brunnel === 'tunnel') continue;
-    draws.push({ cls: TileClass.Road, geometry: f.geometry, bbox: NO_BBOX, widthM: width });
+    const bridge = f.properties?.brunnel === 'bridge';
+    draws.push({ cls: TileClass.Road, geometry: f.geometry, bbox: NO_BBOX, widthM: width, bridge });
   }
   // 4) 건물 (가장 우선)
   for (const f of q('building')) {
@@ -317,7 +331,7 @@ export function classifyChunk(chunk: ChunkId, allDraws: Draw[]): ChunkData {
   for (const cls of CLASS_ORDER) {
     ctx.clearRect(0, 0, size, size);
     for (const d of draws) {
-      if (d.cls === cls) drawShape(d.geometry, d.widthM);
+      if (d.cls === cls && !d.bridge) drawShape(d.geometry, d.widthM);
     }
 
     const data = ctx.getImageData(0, 0, size, size).data;
@@ -397,5 +411,38 @@ export function classifyChunk(chunk: ChunkId, allDraws: Draw[]): ChunkData {
     }
   }
 
-  return { classes: result, heights, colors };
+  // 다리: 선분마다 방향에 따라 빨강(동서) / 초록(남북)으로 그려서, 칸마다 상판 방향을 읽는다.
+  const bridges = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+  const bridgeDraws = draws.filter((d) => d.bridge);
+  if (bridgeDraws.length) {
+    ctx.clearRect(0, 0, size, size);
+    for (const d of bridgeDraws) {
+      const g = d.geometry;
+      const lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : [];
+      ctx.lineWidth = ((d.widthM ?? 0) / realPerMercator) * pxPerM;
+      for (const line of lines) {
+        for (let i = 1; i < line.length; i++) {
+          const [ax, ay] = toPx(line[i - 1]);
+          const [bx, by] = toPx(line[i]);
+          ctx.strokeStyle = Math.abs(bx - ax) >= Math.abs(by - ay) ? '#f00' : '#0f0';
+          ctx.beginPath();
+          ctx.moveTo(ax, ay);
+          ctx.lineTo(bx, by);
+          ctx.stroke();
+        }
+      }
+    }
+    const bData = ctx.getImageData(0, 0, size, size).data;
+    for (let row = 0; row < CHUNK_SIZE; row++) {
+      for (let col = 0; col < CHUNK_SIZE; col++) {
+        const i = row * CHUNK_SIZE + col;
+        if (result[i] === TileClass.Building) continue;
+        const p = ((row * SAMPLE_SCALE + half) * size + col * SAMPLE_SCALE + half) * 4;
+        if (bData[p + 3] < COVER_THRESHOLD) continue;
+        bridges[i] = bData[p] >= bData[p + 1] ? BridgeDir.EastWest : BridgeDir.NorthSouth;
+      }
+    }
+  }
+
+  return { classes: result, heights, colors, bridges };
 }
