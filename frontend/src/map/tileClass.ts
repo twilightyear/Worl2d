@@ -76,6 +76,8 @@ export type Draw = {
   color?: number;
   /** 다리 위 도로. 칸 종류(아래층)에는 넣지 않고, 다리 배열(위층)에만 넣는다. */
   bridge?: boolean;
+  /** 계단(OSM highway=steps). 층이 다른 칸 사이를 오르내릴 수 있다 */
+  stairs?: boolean;
 };
 
 /** 다리 상판 방향 (칸마다). 다리는 이 방향으로만 오르내린다. */
@@ -96,6 +98,8 @@ export type ChunkData = {
   colors: Uint32Array;
   /** 다리 상판 방향(BridgeDir). 다리가 없으면 0. 다리 아래 칸 종류는 classes에 그대로 남는다 */
   bridges: Uint8Array;
+  /** 지도 데이터의 계단이 지나는 칸이면 1 */
+  stairs: Uint8Array;
 };
 
 /** 색 정보가 없는 건물에 쓸 건물 색 (건물마다 하나를 고정으로 고른다) */
@@ -218,7 +222,8 @@ export function collectFeatures(map: MapLibreMap, sourceId: string): Draw[] {
     const width = ROAD_WIDTH_M[cls(f)];
     if (!width || f.properties?.brunnel === 'tunnel') continue;
     const bridge = f.properties?.brunnel === 'bridge';
-    draws.push({ cls: TileClass.Road, geometry: f.geometry, bbox: NO_BBOX, widthM: width, bridge });
+    const stairs = f.properties?.subclass === 'steps';
+    draws.push({ cls: TileClass.Road, geometry: f.geometry, bbox: NO_BBOX, widthM: width, bridge, stairs });
   }
   // 4) 건물 (가장 우선)
   for (const f of q('building')) {
@@ -444,5 +449,21 @@ export function classifyChunk(chunk: ChunkId, allDraws: Draw[]): ChunkData {
     }
   }
 
-  return { classes: result, heights, colors, bridges };
+  // 계단: 다리가 아닌 계단 선이 지나는 칸
+  const stairs = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE);
+  const stairDraws = draws.filter((d) => d.stairs && !d.bridge);
+  if (stairDraws.length) {
+    ctx.clearRect(0, 0, size, size);
+    ctx.strokeStyle = '#fff';
+    for (const d of stairDraws) drawShape(d.geometry, d.widthM);
+    const sData = ctx.getImageData(0, 0, size, size).data;
+    for (let row = 0; row < CHUNK_SIZE; row++) {
+      for (let col = 0; col < CHUNK_SIZE; col++) {
+        const p = ((row * SAMPLE_SCALE + half) * size + col * SAMPLE_SCALE + half) * 4;
+        if (sData[p + 3] >= COVER_THRESHOLD) stairs[row * CHUNK_SIZE + col] = 1;
+      }
+    }
+  }
+
+  return { classes: result, heights, colors, bridges, stairs };
 }

@@ -1,6 +1,7 @@
 import type { Map as MapLibreMap } from 'maplibre-gl';
 import { CHUNK_SIZE, chunkBounds, chunkOf, chunksInBounds, tileAt, toMercator, type ChunkId } from './grid';
 import { GRID_MIN_ZOOM } from './gridLayer';
+import { createTerrain } from './terrain';
 import { classifyChunk, collectFeatures, findVectorSourceId, type ChunkData, type Draw, type TileClass } from './tileClass';
 
 // 청크 키를 숫자로 만든다 (문자열을 매번 만들지 않게). |cy|는 25만을 넘지 않는다.
@@ -15,6 +16,14 @@ export type TileStore = {
   color(x: number, y: number): number;
   /** 다리 상판 방향(BridgeDir). 다리가 없거나 계산 전이면 0 */
   bridge(x: number, y: number): number;
+  /** 지도 데이터의 계단 칸인지 */
+  osmStairs(x: number, y: number): boolean;
+  /** 칸의 층(해발 높이를 LEVEL_M 단위로 끊은 값). 지형 데이터를 받기 전이면 undefined */
+  level(x: number, y: number): number | undefined;
+  /** 칸의 해발 높이(m). 받기 전이면 undefined */
+  elevation(x: number, y: number): number | undefined;
+  /** 지형 데이터가 새로 들어올 때마다 1씩 커진다 */
+  terrainVersion(): number;
   /** 청크 데이터 (계산 전이면 undefined) */
   chunk(cx: number, cy: number): ChunkData | undefined;
   /** 새 청크가 계산될 때마다 1씩 커진다 (그림 캐시를 다시 만들지 판단할 때 쓴다) */
@@ -62,6 +71,7 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
   };
   let scheduled = false;
   let version = 0;
+  const terrain = createTerrain(onUpdate);
   /** 덮는 데이터 타일이 다 있기 전에 화면에 보여 주려고 임시로 계산한 청크 */
   const provisional = new Set<number>();
 
@@ -173,6 +183,13 @@ export function createTileStore(map: MapLibreMap, onUpdate: () => void): TileSto
       const found = locate(x, y);
       return found ? found[0].bridges[found[1]] : 0;
     },
+    osmStairs(x, y) {
+      const found = locate(x, y);
+      return found ? found[0].stairs[found[1]] === 1 : false;
+    },
+    level: terrain.level,
+    elevation: terrain.elevation,
+    terrainVersion: terrain.version,
     chunk(cx, cy) {
       return chunks.get(key(cx, cy));
     },
