@@ -151,7 +151,7 @@ function wall(eaves: boolean, base: boolean, wallColor: number, roofColor: numbe
  * (어둡게만 하면 밝은 벽 색들이 모두 비슷한 어두운 색이 되어 지붕이 구분되지 않았다)
  * 회색 계열(채도가 아주 낮은 색)은 회색 지붕으로 둔다.
  */
-function roofColorOf(wallColor: number): number {
+export function roofColorOf(wallColor: number): number {
   const r = ((wallColor >> 16) & 255) / 255;
   const g = ((wallColor >> 8) & 255) / 255;
   const b = (wallColor & 255) / 255;

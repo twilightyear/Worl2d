@@ -4,9 +4,9 @@ import { GRID_MIN_ZOOM } from '../map/gridLayer';
 import { TileClass } from '../map/tileClass';
 import type { TileStore } from '../map/tileStore';
 import type { CharacterState } from './character';
-import { createSprites, SPRITE_PX, variantOf, type BuildingSprites } from './sprites';
+import { createSprites, roofColorOf, SPRITE_PX, variantOf } from './sprites';
 import { hash, isSidewalk, objectAt } from './placement';
-import { connects, loadTileset, type Tileset } from './tileset';
+import { connects, loadTileset, tint, type Tileset } from './tileset';
 
 const EARTH_CIRCUMFERENCE = 2 * Math.PI * 6378137;
 const WORLD_PX = 512; // MapLibre의 줌 0 세계 크기(px)
@@ -116,6 +116,37 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       map.triggerRepaint();
     })
     .catch((err) => console.error(err));
+
+  // 건물 벽·지붕 그림 (색 × 종류별로 한 번만 만든다)
+  const facadeCache = new Map<string, HTMLCanvasElement>();
+  const cached = (key: string, make: () => HTMLCanvasElement) => {
+    let c = facadeCache.get(key);
+    if (!c) {
+      c = make();
+      facadeCache.set(key, c);
+    }
+    return c;
+  };
+  const shadeHex = (color: number, f: number) => {
+    const ch = (v: number) => Math.max(0, Math.min(255, Math.round(v * f)));
+    return `rgb(${ch((color >> 16) & 255)},${ch((color >> 8) & 255)},${ch(color & 255)})`;
+  };
+  /** 벽 한 줄: 건물 색 벽돌 + 창문(1층은 가끔 문). eaves = 맨 윗줄(처마), base = 1층 */
+  const facadeWall = (t: Tileset, color: number, eaves: boolean, base: boolean, door: number) =>
+    cached(`w${color}-${eaves}-${base}-${door}`, () => {
+      const c = tint(t.facade.brick, color);
+      const g = c.getContext('2d')!;
+      if (base && door >= 0) g.drawImage(t.facade.doors[door], 0, 0);
+      else g.drawImage(t.facade.window, 0, 0);
+      if (eaves) {
+        g.fillStyle = shadeHex(roofColorOf(color), 0.75); // 처마
+        g.fillRect(0, 0, SPRITE_PX, 2);
+      }
+      g.fillStyle = shadeHex(color, base ? 0.55 : 0.8); // 바닥 그림자 / 층 구분선
+      g.fillRect(0, SPRITE_PX - 1, SPRITE_PX, 1);
+      return c;
+    });
+  const facadeRoof = (t: Tileset, color: number) => cached(`r${color}`, () => tint(t.facade.concrete, roofColorOf(color)));
 
   /** 바닥 칸 그림. 타일셋이 있으면 이웃을 보고 오토타일을 고른다. */
   const groundTile = (x: number, y: number, cls: TileClass): HTMLCanvasElement => {
@@ -360,7 +391,8 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
      * 옆면 하나를 그린다. 모서리(e0 → e1, 바닥 높이 a)에서 꼭대기 높이 b까지.
      * 창문 줄은 꼭대기에서부터 WALL_ROW_M마다 한 장씩 붙이고, 맨 아래 줄은 남는 만큼만 잘라 쓴다.
      */
-    const face = (bs: BuildingSprites, f: Face, e0: [number, number], e1: [number, number], a: number, b: number) => {
+    type WallFn = (eaves: boolean, base: boolean) => HTMLCanvasElement;
+    const face = (wallOf: WallFn, f: Face, e0: [number, number], e1: [number, number], a: number, b: number) => {
       const P = ([mx, my]: [number, number], h: number): Pt => [PX(mx, h), PY(my, h)];
       const quad = [P(e0, a), P(e1, a), P(e1, b), P(e0, b)];
       if (!textured) {
@@ -371,7 +403,7 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
           const tTop = b - i * wallRowMerc;
           const tBottom = Math.max(a, tTop - wallRowMerc);
           const part = (tTop - tBottom) / wallRowMerc; // 이 줄에서 쓰는 비율 (맨 아래 줄만 1보다 작을 수 있음)
-          const src = wallImg(bs.wall(i === 0, a === 0 && i === rows - 1), f);
+          const src = wallImg(wallOf(i === 0, a === 0 && i === rows - 1), f);
           const used = Math.max(1, Math.round(part * SPRITE_PX));
           const tMid = (tTop + tBottom) / 2;
           // 띠의 네 모서리 중 가운데 높이 기준으로 사각형을 잡는다 (원근에 의한 미세한 사다리꼴은 무시)
@@ -448,6 +480,10 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       }
       const { x, y, h, color } = item;
       const bs = sprites.building(color);
+      // 타일셋이 있으면 Kenney 재료로 만든 벽(1층은 4칸 중 1칸꼴로 문), 없으면 코드로 만든 벽
+      const doorPick = hash(x, y) % 4 === 0 ? hash(y, x) % 3 : -1;
+      const ts = tileset;
+      const wallOf: WallFn = ts ? (eaves, base) => facadeWall(ts, color, eaves, base, doorPick) : bs.wall;
       const xa = x * TILE_SIZE;
       const xb = (x + 1) * TILE_SIZE;
       const ya = y * TILE_SIZE;
@@ -460,17 +496,17 @@ export function createTileRenderer(map: MapLibreMap, store: TileStore): TileRend
       const hn = heightAt(x, y + 1);
       const hw = heightAt(x - 1, y);
       const he = heightAt(x + 1, y);
-      if (hw < h && PX(xa, h) > PX(xa)) face(bs, 'west', [xa, ya], [xa, yb], hw, h);
-      if (he < h && PX(xb, h) < PX(xb)) face(bs, 'east', [xb, ya], [xb, yb], he, h);
-      if (hn < h && PY(yb, h) > PY(yb)) face(bs, 'north', [xa, yb], [xb, yb], hn, h);
-      if (hs < h && PY(ya, h) < PY(ya)) face(bs, 'south', [xa, ya], [xb, ya], hs, h);
+      if (hw < h && PX(xa, h) > PX(xa)) face(wallOf, 'west', [xa, ya], [xa, yb], hw, h);
+      if (he < h && PX(xb, h) < PX(xb)) face(wallOf, 'east', [xb, ya], [xb, yb], he, h);
+      if (hn < h && PY(yb, h) > PY(yb)) face(wallOf, 'north', [xa, yb], [xb, yb], hn, h);
+      if (hs < h && PY(ya, h) < PY(ya)) face(wallOf, 'south', [xa, ya], [xb, ya], hs, h);
 
       // 지붕(윗면)
       const left = Math.round(PX(xa, h));
       const right = Math.round(PX(xb, h));
       const top = Math.round(PY(yb, h));
       const bottom = Math.round(PY(ya, h));
-      ctx.drawImage(bs.roofs[variantOf(x, y)], left, top, right - left, bottom - top);
+      ctx.drawImage(ts ? facadeRoof(ts, color) : bs.roofs[variantOf(x, y)], left, top, right - left, bottom - top);
 
       // 지붕 외곽선: 이웃이 더 낮은 쪽 (두께 = 도트 1px)
       const t = Math.max(1, Math.round((right - left) / SPRITE_PX));

@@ -20,9 +20,46 @@ export type Tileset = {
   paving: HTMLCanvasElement[];
   /** 물체 그림 (16×32: 아래쪽이 칸에 닿는다). 같은 종류에 변형이 여러 개일 수 있다. */
   objects: Record<ObjectKind, HTMLCanvasElement[]>;
+  /** 건물 재료: 무늬(흑백으로 바꿔 건물 색을 입힘), 창문, 문 */
+  facade: {
+    brick: HTMLCanvasElement;
+    concrete: HTMLCanvasElement;
+    window: HTMLCanvasElement;
+    doors: HTMLCanvasElement[];
+  };
   /** 캐릭터 시트 (16×16 칸, 열 = 방향, 0~3행 = 걷기) */
   character: HTMLImageElement;
 };
+
+/**
+ * 무늬 그림에 색을 입힌다: 밝기 차이(무늬)는 살리고 평균 색은 color가 되게 한다.
+ */
+export function tint(src: HTMLCanvasElement, color: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = src.width;
+  c.height = src.height;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('canvas 2d context를 만들 수 없습니다');
+  ctx.drawImage(src, 0, 0);
+  const img = ctx.getImageData(0, 0, c.width, c.height);
+  const d = img.data;
+  const lum = (i: number) => 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2];
+  let sum = 0;
+  let n = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue;
+    sum += lum(i);
+    n++;
+  }
+  const mean = n ? sum / n : 128;
+  const rgb = [(color >> 16) & 255, (color >> 8) & 255, color & 255];
+  for (let i = 0; i < d.length; i += 4) {
+    const f = lum(i) / mean;
+    for (let k = 0; k < 3; k++) d[i + k] = Math.max(0, Math.min(255, Math.round(rgb[k] * f)));
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -98,6 +135,12 @@ export async function loadTileset(): Promise<Tileset> {
       streetTree: [cut(urban, 17, 8, 1, 2)],
       tree: [cut(urban, 16, 8, 1, 2), cut(urban, 17, 8, 1, 2), cut(urban, 21, 8, 1, 2)],
       bench: [cut(urban, 1, 10)],
+    },
+    facade: {
+      brick: cut(urban, 18, 1),
+      concrete: cut(urban, 9, 1),
+      window: cut(urban, 13, 16),
+      doors: [cut(urban, 14, 10), cut(urban, 13, 10), cut(urban, 15, 10)],
     },
     character,
   };
